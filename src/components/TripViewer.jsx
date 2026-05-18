@@ -82,10 +82,18 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
 
   const handleSave = useCallback(async (updated) => {
     setSaving(true);
-    // Update in-memory
-    const newTrips = trips.map((t, ti) =>
-      ti !== tripIdx ? t : { ...t, points: t.points.map((p, pi) => pi === editing.idx ? updated : p) }
-    );
+    // Update in-memory and recalculate nServices
+    const newTrips = trips.map((t, ti) => {
+      if (ti !== tripIdx) return t;
+      const newPoints = t.points.map((p, pi) => pi === editing.idx ? updated : p);
+      // Recalculate nServices: count WORKING_STOP transitions that are not BORRADO
+      let nServices = 0, prev = null;
+      for (const p of newPoints) {
+        if (p.state === "WORKING_STOP" && prev !== "WORKING_STOP" && p.tipo_servicio !== "BORRADO") nServices++;
+        prev = p.state;
+      }
+      return { ...t, points: newPoints, nServices };
+    });
     setTrips(newTrips);
     setEditing(null); setSelPt(null);
 
