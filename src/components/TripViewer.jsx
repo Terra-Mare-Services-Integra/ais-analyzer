@@ -195,7 +195,9 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
                       <strong>{new Date(p.datetime).toLocaleString("es-AR")}</strong><br/>
                       SOG: {p.sog} kn | {p.zone}<br/>
                       {STATES[p.state]?.label}
-                      {svcInfo && <><br/><em style={{color:col}}>{svcInfo.label}</em></>}
+                      {p.servicio_num != null && p.tipo_servicio && p.tipo_servicio !== "SIN_CLASIFICAR" && p.tipo_servicio !== "BORRADO" && (
+                        <><br/><em style={{color:col}}>{SERVICE_TYPES[p.tipo_servicio]?.label}</em></>
+                      )}
                       {p.state==="WORKING_STOP" && <button style={{ marginTop:6,width:"100%",padding:"5px 0",borderRadius:6,background:"#235C96",color:"#fff",border:"none",fontSize:11,cursor:"pointer" }} onClick={()=>setEditing({idx:i,pt:p})}>✏ Clasificar</button>}
                     </div>
                   </Popup>
