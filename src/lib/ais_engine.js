@@ -12,11 +12,10 @@ export const ZONES = {
 export const OPERATIONAL_ZONES = ["ZONA_COMUN", "KM171", "UPRIVER", "RECALADA"];
 
 export const STATES = {
-  IN_PORT:       { label: "En Puerto",       color: "#1a3a6c" },
-  TRANSIT:       { label: "Navegando",        color: "#64B5F6" },
-  WORKING_STOP:  { label: "Servicio",         color: "#66BB6A" },
-  MICRO_TRANSIT: { label: "Micro-tránsito",   color: "#FFA726" },
-  IDLE_OUTSIDE:  { label: "Fondeo / Espera",  color: "#78909C" },
+  IN_PORT:      { label: "En Puerto",      color: "#1a3a6c" },
+  TRANSIT:      { label: "Navegando",      color: "#64B5F6" },
+  WORKING_STOP: { label: "Operando",       color: "#66BB6A" },
+  IDLE_OUTSIDE: { label: "Fondeo / Espera",color: "#78909C" },
 };
 
 export const SERVICE_TYPES = {
@@ -48,10 +47,9 @@ export function classifyZone(lat, lon) {
 }
 
 export function classifyState(zone, sog) {
-  if (zone === "DARSENA_E" && sog <= 0.5)                                      return "IN_PORT";
-  if (OPERATIONAL_ZONES.includes(zone) && sog <= 1.5)                         return "WORKING_STOP";
-  if (OPERATIONAL_ZONES.includes(zone) && sog > 1.5)                          return "MICRO_TRANSIT";
-  if (zone !== "DARSENA_E" && !OPERATIONAL_ZONES.includes(zone) && sog > 3)   return "TRANSIT";
+  if (zone === "DARSENA_E" && sog <= 0.5)                                    return "IN_PORT";
+  if (OPERATIONAL_ZONES.includes(zone))                                      return "WORKING_STOP"; // todo movimiento en zona operativa = operando
+  if (zone !== "DARSENA_E" && !OPERATIONAL_ZONES.includes(zone) && sog > 3) return "TRANSIT";
   return "IDLE_OUTSIDE";
 }
 
@@ -134,11 +132,8 @@ export function detectTrips(points) {
     if (departureIdx !== null && p.zone === "DARSENA_E" && p.sog <= 0.5) {
       const tp = points.slice(departureIdx, i + 1);
 
-      let nServices = 0, prev = null;
-      for (const pt of tp) {
-        if (pt.state === "WORKING_STOP" && prev !== "WORKING_STOP" && pt.tipo_servicio !== "BORRADO") nServices++;
-        prev = pt.state;
-      }
+      // nServices se calcula manualmente por el usuario al clasificar
+      const nServices = 0;
 
       let distNm = 0;
       for (let j = 1; j < tp.length; j++) distNm += haversine(tp[j-1].lat, tp[j-1].lon, tp[j].lat, tp[j].lon);

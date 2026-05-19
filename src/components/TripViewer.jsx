@@ -17,31 +17,55 @@ function MapFit({ points }) {
   return null;
 }
 
-function ServiceEditor({ point, onSave, onClose }) {
-  const [svc,  setSvc]  = useState(point.tipo_servicio || "SIN_CLASIFICAR");
-  const [zona, setZona] = useState(point.zona_servicio || "ZONA_COMUN");
+// Colores por número de servicio
+const SVC_COLORS = ["#2196F3","#FF9800","#9C27B0","#4CAF50","#F44336","#00BCD4","#FF5722"];
+const svcColor = (n) => n != null ? SVC_COLORS[(n-1) % SVC_COLORS.length] : "#9E9E9E";
+
+function ServiceEditor({ point, onSave, onClose, maxSvcNum }) {
+  const [svc,     setSvc]     = useState(point.tipo_servicio || "SIN_CLASIFICAR");
+  const [zona,    setZona]    = useState(point.zona_servicio || "ZONA_COMUN");
+  const [svcNum,  setSvcNum]  = useState(point.servicio_num || null);
   const SVCS  = ["AGUA","SLOP","LUBRICANTES","ALIJO_ZC","ALIJO_ZA","ALIJO_ZD","BORRADO"];
   const ZONAS = ["ZONA_COMUN","ZONA_ALFA","ZONA_DELTA","RECALADA","KM171"];
+  // Build service number options: existing ones + one new
+  const svcNums = Array.from({length: (maxSvcNum || 0) + 1}, (_, i) => i + 1);
 
   return (
     <div style={{ position:"fixed",inset:0,background:"rgba(0,0,0,.4)",zIndex:9999,display:"flex",alignItems:"center",justifyContent:"center",padding:16 }} onClick={onClose}>
-      <div style={{ background:"#fff",borderRadius:14,padding:22,width:"100%",maxWidth:340,boxShadow:"0 20px 60px rgba(0,0,0,.25)" }} onClick={e=>e.stopPropagation()}>
-        <div style={{ fontSize:14,fontWeight:700,color:"#213363",marginBottom:2 }}>Clasificar servicio</div>
+      <div style={{ background:"#fff",borderRadius:14,padding:22,width:"100%",maxWidth:360,boxShadow:"0 20px 60px rgba(0,0,0,.25)" }} onClick={e=>e.stopPropagation()}>
+        <div style={{ fontSize:14,fontWeight:700,color:"#213363",marginBottom:2 }}>Clasificar punto</div>
         <div style={{ fontSize:10,color:"#6381A7",fontFamily:"var(--mono)",marginBottom:16 }}>
           {new Date(point.datetime).toLocaleString("es-AR")} · SOG {point.sog} kn · {point.zone}
         </div>
-        <div style={{ fontSize:10,fontWeight:600,color:"#6381A7",textTransform:"uppercase",letterSpacing:".8px",marginBottom:8 }}>Tipo de servicio</div>
-        <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:5,marginBottom:14 }}>
-          {SVCS.map(s => {
-            const info = SERVICE_TYPES[s];
-            return (
-              <button key={s}
-                style={{ padding:"8px 6px",borderRadius:6,border:`1px solid ${svc===s?info.color:"#D6E0ED"}`,fontSize:10,fontWeight:svc===s?700:500,cursor:"pointer",textAlign:"center",background:svc===s?info.color+"18":"#fff",color:svc===s?info.color:"#213363",transition:"all .12s" }}
-                onClick={()=>setSvc(s)}>{info.label}</button>
-            );
-          })}
+
+        {/* Servicio numero */}
+        <div style={{ fontSize:10,fontWeight:600,color:"#6381A7",textTransform:"uppercase",letterSpacing:".8px",marginBottom:8 }}>Número de servicio</div>
+        <div style={{ display:"flex",gap:6,marginBottom:14,flexWrap:"wrap" }}>
+          <button
+            style={{ padding:"7px 12px",borderRadius:6,border:`1px solid ${svcNum===null?"#D6E0ED":"#D6E0ED"}`,fontSize:11,cursor:"pointer",background:svcNum===null?"#FFF5F5":"#fff",color:svcNum===null?"#C0392B":"#6381A7",fontWeight:svcNum===null?700:400 }}
+            onClick={()=>{ setSvcNum(null); setSvc("BORRADO"); }}>✕ No es servicio</button>
+          {svcNums.map(n => (
+            <button key={n}
+              style={{ padding:"7px 14px",borderRadius:6,border:`1px solid ${svcNum===n?svcColor(n):"#D6E0ED"}`,fontSize:11,cursor:"pointer",background:svcNum===n?svcColor(n)+"18":"#fff",color:svcNum===n?svcColor(n):"#213363",fontWeight:svcNum===n?700:400 }}
+              onClick={()=>{ setSvcNum(n); if(svc==="BORRADO"||svc==="SIN_CLASIFICAR") setSvc("AGUA"); }}>
+              S{n}{n === (maxSvcNum||0)+1 ? " (nuevo)" : ""}
+            </button>
+          ))}
         </div>
-        {svc !== "BORRADO" && <>
+
+        {svcNum !== null && <>
+          <div style={{ fontSize:10,fontWeight:600,color:"#6381A7",textTransform:"uppercase",letterSpacing:".8px",marginBottom:8 }}>Tipo de servicio</div>
+          <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:5,marginBottom:14 }}>
+            {SVCS.filter(s=>s!=="BORRADO").map(s => {
+              const info = SERVICE_TYPES[s];
+              return (
+                <button key={s}
+                  style={{ padding:"8px 6px",borderRadius:6,border:`1px solid ${svc===s?info.color:"#D6E0ED"}`,fontSize:10,fontWeight:svc===s?700:500,cursor:"pointer",textAlign:"center",background:svc===s?info.color+"18":"#fff",color:svc===s?info.color:"#213363",transition:"all .12s" }}
+                  onClick={()=>setSvc(s)}>{info.label}</button>
+              );
+            })}
+          </div>
+
           <div style={{ fontSize:10,fontWeight:600,color:"#6381A7",textTransform:"uppercase",letterSpacing:".8px",marginBottom:8 }}>Zona operativa</div>
           <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:5,marginBottom:16 }}>
             {ZONAS.map(z => (
@@ -51,13 +75,12 @@ function ServiceEditor({ point, onSave, onClose }) {
             ))}
           </div>
         </>}
+
         <div style={{ display:"flex",gap:7 }}>
           <button style={{ flex:1,padding:"9px 0",borderRadius:7,background:"#235C96",color:"#fff",border:"none",fontSize:12,fontWeight:600,cursor:"pointer" }}
-            onClick={()=>onSave({...point,tipo_servicio:svc,zona_servicio:zona})}>✓ Confirmar</button>
-          <button style={{ padding:"9px 12px",borderRadius:7,border:"1px solid #FECACA",background:"#fff",color:"#C0392B",fontSize:11,fontWeight:600,cursor:"pointer" }}
-            onClick={()=>onSave({...point,tipo_servicio:"BORRADO"})}>✕ Borrar</button>
+            onClick={()=>onSave({...point, tipo_servicio: svcNum===null?"BORRADO":svc, zona_servicio:zona, servicio_num:svcNum})}>✓ Confirmar</button>
           <button style={{ padding:"9px 12px",borderRadius:7,border:"1px solid #D6E0ED",background:"#fff",color:"#6381A7",fontSize:11,cursor:"pointer" }}
-            onClick={onClose}>Cancel</button>
+            onClick={onClose}>Cancelar</button>
         </div>
       </div>
     </div>
@@ -82,16 +105,13 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
 
   const handleSave = useCallback(async (updated) => {
     setSaving(true);
-    // Update in-memory and recalculate nServices
+    // Update in-memory — nServices = count of unique service numbers assigned
     const newTrips = trips.map((t, ti) => {
       if (ti !== tripIdx) return t;
       const newPoints = t.points.map((p, pi) => pi === editing.idx ? updated : p);
-      // Recalculate nServices: count WORKING_STOP transitions that are not BORRADO
-      let nServices = 0, prev = null;
-      for (const p of newPoints) {
-        if (p.state === "WORKING_STOP" && prev !== "WORKING_STOP" && p.tipo_servicio !== "BORRADO") nServices++;
-        prev = p.state;
-      }
+      // Count distinct servicio_num values (not null, not BORRADO)
+      const servicios = new Set(newPoints.filter(p => p.servicio_num != null).map(p => p.servicio_num));
+      const nServices = servicios.size;
       return { ...t, points: newPoints, nServices };
     });
     setTrips(newTrips);
@@ -163,9 +183,9 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
             ))}
             {segments.map((s,i) => <Polyline key={i} positions={s.pos} color={s.color} weight={3} opacity={0.85} />)}
             {points.map((p,i) => {
-              if (p.state !== "WORKING_STOP" && p.state !== "MICRO_TRANSIT") return null;
-              const svcInfo = p.tipo_servicio ? SERVICE_TYPES[p.tipo_servicio] : null;
-              const col = svcInfo ? svcInfo.color : (STATES[p.state]?.color||"#66BB6A");
+              if (p.state !== "WORKING_STOP") return null;
+              // Color by service number if assigned, otherwise gray
+              const col = p.servicio_num != null ? svcColor(p.servicio_num) : "#9E9E9E";
               return (
                 <CircleMarker key={i} center={[p.lat,p.lon]} radius={p.state==="WORKING_STOP"?8:5}
                   color={col} weight={2} fillColor={col} fillOpacity={0.9}
@@ -219,8 +239,9 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
             {visible.map((p,vi) => {
               const realIdx = points.indexOf(p);
               const isWS = p.state === "WORKING_STOP";
-              const svcInfo = p.tipo_servicio ? SERVICE_TYPES[p.tipo_servicio] : null;
-              const col = svcInfo ? svcInfo.color : (STATES[p.state]?.color||"#999");
+              const col = isWS
+                ? (p.servicio_num != null ? svcColor(p.servicio_num) : "#9E9E9E")
+                : (STATES[p.state]?.color || "#999");
               const isSel = selPt === realIdx;
               return (
                 <div key={vi}
@@ -229,7 +250,9 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
                   <span style={{ fontFamily:"var(--mono)",fontSize:9,color:"#6381A7",lineHeight:1.3 }}>{fmtTime(p.datetime)}<br/><span style={{fontSize:8,color:"#A5B5CC"}}>{fmtDate(p.datetime)}</span></span>
                   <span style={{ fontFamily:"var(--mono)",fontSize:10,textAlign:"right",color:p.sog>3?"#235C96":p.sog<=0.5?"#1E7A4A":"#854F0B" }}>{p.sog}kn</span>
                   <span style={{ fontSize:8,padding:"2px 5px",borderRadius:3,background:col+"18",color:col,border:`1px solid ${col}44`,fontFamily:"var(--mono)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>
-                    {svcInfo ? svcInfo.label : STATES[p.state]?.label || p.state}
+                    {p.servicio_num != null
+                      ? `S${p.servicio_num}${p.tipo_servicio && p.tipo_servicio !== "SIN_CLASIFICAR" && p.tipo_servicio !== "BORRADO" ? ` · ${SERVICE_TYPES[p.tipo_servicio]?.label||""}` : ""}`
+                      : STATES[p.state]?.label || p.state}
                   </span>
                   <span style={{ fontSize:11,color:isSel?"#235C96":"#D6E0ED",textAlign:"center" }}>{isWS?"✏":""}</span>
                 </div>
@@ -239,7 +262,12 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
         </div>
       </div>
 
-      {editing && <ServiceEditor point={editing.pt} onSave={handleSave} onClose={()=>setEditing(null)} />}
+      {editing && <ServiceEditor
+        point={editing.pt}
+        onSave={handleSave}
+        onClose={()=>setEditing(null)}
+        maxSvcNum={Math.max(0, ...points.map(p => p.servicio_num || 0))}
+      />}
     </div>
   );
 }
