@@ -115,20 +115,30 @@ export function parseAISExcel(buffer) {
 }
 
 // ─── TRIP DETECTION ───────────────────────────────────────────────────────────
+// Viaje = zarpe (sale de Darsena, SOG>3) → arribo (entra a Darsena, SOG≤0.5)
+// Tiempo muerto = todo lo que ocurre dentro de Darsena entre viajes
 export function detectTrips(points) {
   const trips = [];
-  let tripStart = null, departureIdx = null;
+  let departureIdx = null;
 
   for (let i = 0; i < points.length; i++) {
     const p = points[i];
 
-    if (tripStart === null && p.zone === "DARSENA_E") { tripStart = i; continue; }
-    if (tripStart !== null && departureIdx === null && p.zone !== "DARSENA_E" && p.sog > 3) departureIdx = i;
+    // Zarpe: primer punto fuera de Darsena con SOG > 3
+    if (departureIdx === null && p.zone !== "DARSENA_E" && p.sog > 3) {
+      departureIdx = i;
+      continue;
+    }
+
+    // Arribo: vuelve a Darsena con SOG <= 0.5
     if (departureIdx !== null && p.zone === "DARSENA_E" && p.sog <= 0.5) {
-      const tp = points.slice(tripStart, i + 1);
+      const tp = points.slice(departureIdx, i + 1);
 
       let nServices = 0, prev = null;
-      for (const pt of tp) { if (pt.state === "WORKING_STOP" && prev !== "WORKING_STOP") nServices++; prev = pt.state; }
+      for (const pt of tp) {
+        if (pt.state === "WORKING_STOP" && prev !== "WORKING_STOP" && pt.tipo_servicio !== "BORRADO") nServices++;
+        prev = pt.state;
+      }
 
       let distNm = 0;
       for (let j = 1; j < tp.length; j++) distNm += haversine(tp[j-1].lat, tp[j-1].lon, tp[j].lat, tp[j].lon);
@@ -136,23 +146,47 @@ export function detectTrips(points) {
       const zones = [...new Set(tp.map(p => p.zone).filter(z => z !== "DARSENA_E" && z !== "OPEN_SEA"))];
 
       trips.push({
-        id:           trips.length + 1,
-        dateStart:    points[tripStart].datetime,
+        id:            trips.length + 1,
+        dateStart:     points[departureIdx].datetime,
         dateDeparture: points[departureIdx].datetime,
-        dateEnd:      points[i].datetime,
-        durationHs:   (points[i].datetime - points[tripStart].datetime) / 3600000,
-        navHs:        (points[i].datetime - points[departureIdx].datetime) / 3600000,
-        distNm:       Math.round(distNm),
+        dateEnd:       points[i].datetime,
+        durationHs:    (points[i].datetime - points[departureIdx].datetime) / 3600000,
+        navHs:         (points[i].datetime - points[departureIdx].datetime) / 3600000,
+        distNm:        Math.round(distNm),
         nServices,
         zones,
-        points:       tp,
-        validated:    false,
+        points:        tp,
+        validated:     false,
       });
 
-      tripStart = i; departureIdx = null;
+      departureIdx = null;
     }
   }
   return trips;
+}
+
+// ─── IDLE PERIODS (tiempos muertos en Darsena entre viajes) ──────────────────
+export function detectIdlePeriods(points, trips) {
+  if (!trips.length) return [];
+  const idle = [];
+
+  for (let i = 0; i < trips.length - 1; i++) {
+    const arribo = trips[i].dateEnd;
+    const zarpe  = trips[i+1].dateStart;
+    const hs = (zarpe - arribo) / 3600000;
+    if (hs > 0.5) {
+      idle.push({
+        id: i + 1,
+        type: "idle",
+        dateStart:  arribo,
+        dateEnd:    zarpe,
+        durationHs: hs,
+        label: `Entre viaje ${trips[i].id} y ${trips[i+1].id}`,
+      });
+    }
+  }
+
+  return idle;
 }
 
 // ─── KPI AGGREGATION ─────────────────────────────────────────────────────────
