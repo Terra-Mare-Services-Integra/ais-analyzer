@@ -120,9 +120,28 @@ async function loadUploadFromSupabase(uploadRecord) {
   if (!tripRows?.length) return { uploadId:uploadRecord.id, filename:uploadRecord.filename, trips:[], loadedAt:new Date() };
 
   const tripIds = tripRows.map(t => t.id);
-  const { data: allPoints, error: ptErr } = await supabase
-    .from("ais_points").select("*").in("trip_id", tripIds).order("datetime");
-  if (ptErr) throw new Error("Error cargando puntos: " + ptErr.message);
+
+  // FIX REGRESIÓN: Supabase tiene un límite de 1000 filas por request.
+  // Con el campo servicio_num agregado hoy, viajes largos (#31-33, 15h+)
+  // superan ese límite y la query retorna datos truncados SIN error,
+  // causando points:[] en esos viajes aunque existan en la DB.
+  // Solución: paginación con range() hasta obtener todos los puntos.
+  const PAGE_SIZE = 1000;
+  let allPoints = [];
+  let from = 0;
+  while (true) {
+    const { data: page, error: ptErr } = await supabase
+      .from("ais_points")
+      .select("*")
+      .in("trip_id", tripIds)
+      .order("datetime")
+      .range(from, from + PAGE_SIZE - 1);
+    if (ptErr) throw new Error("Error cargando puntos: " + ptErr.message);
+    if (!page?.length) break;
+    allPoints = allPoints.concat(page);
+    if (page.length < PAGE_SIZE) break; // última página
+    from += PAGE_SIZE;
+  }
 
   const pointsByTrip = {};
   for (const p of (allPoints||[])) {
