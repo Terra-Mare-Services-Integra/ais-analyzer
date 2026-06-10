@@ -1,248 +1,126 @@
-import { useState, useCallback, useEffect, useRef } from "react";
-import { MapContainer, TileLayer, Polyline, CircleMarker, Popup, useMap } from "react-leaflet";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
+import { MapContainer, TileLayer, Polyline, Polygon, CircleMarker, Popup, useMap } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 import { ZONES, STATES, SERVICE_TYPES } from "../lib/ais_engine";
 import { supabase } from "../lib/supabase";
 
-// ─── HELPERS DE FECHA ─────────────────────────────────────────────────────────
-// FIX UX: siempre formato 24h explícito usando componentes UTC.
-// La versión anterior usaba toLocaleTimeString("es-AR") que en algunos browsers
-// devuelve "6:37 a.m." o "06:37 a. m." con puntos y espacio — inconsistente.
+// ─── HELPERS DE FECHA (UTC 24h) ───────────────────────────────────────────────
 const fmtDate = d => {
   if (!d) return "—";
   const dt = d instanceof Date ? d : new Date(d);
   if (isNaN(dt.getTime())) return "—";
-  const dd = String(dt.getUTCDate()).padStart(2, "0");
-  const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
-  const yy = String(dt.getUTCFullYear()).slice(-2);
-  return `${dd}/${mm}/${yy}`;
+  return `${String(dt.getUTCDate()).padStart(2,"0")}/${String(dt.getUTCMonth()+1).padStart(2,"0")}/${String(dt.getUTCFullYear()).slice(-2)}`;
 };
-
 const fmtTime = d => {
   if (!d) return "—";
   const dt = d instanceof Date ? d : new Date(d);
   if (isNaN(dt.getTime())) return "—";
-  return `${String(dt.getUTCHours()).padStart(2, "0")}:${String(dt.getUTCMinutes()).padStart(2, "0")}`;
+  return `${String(dt.getUTCHours()).padStart(2,"0")}:${String(dt.getUTCMinutes()).padStart(2,"0")}`;
 };
+const fmtDatetime = d => d ? `${fmtDate(d)} ${fmtTime(d)} UTC` : "—";
 
-const fmtDatetime = d => {
-  if (!d) return "—";
-  return `${fmtDate(d)} ${fmtTime(d)} UTC`;
-};
+// UX-15: duración legible "4d 15h" en vez de solo "h"
+function fmtDuration(hs) {
+  if (hs == null || isNaN(hs)) return "—";
+  const days = Math.floor(hs / 24);
+  const hrs  = Math.round(hs % 24);
+  if (days > 0) return `${days}d ${hrs}h`;
+  return `${hrs}h`;
+}
 
 // ─── COLORES POR NÚMERO DE SERVICIO ──────────────────────────────────────────
-const SVC_COLORS = ["#2196F3", "#FF9800", "#9C27B0", "#4CAF50", "#F44336", "#00BCD4", "#FF5722"];
-const svcColor = (n) => (n != null ? SVC_COLORS[(n - 1) % SVC_COLORS.length] : "#9E9E9E");
+const SVC_COLORS = ["#2196F3","#FF9800","#9C27B0","#4CAF50","#F44336","#00BCD4","#FF5722"];
+const svcColor = n => n != null ? SVC_COLORS[(n-1) % SVC_COLORS.length] : "#9E9E9E";
 
-// ─── MAP FIT — LA RAÍZ DEL BUG DE ZOOM ───────────────────────────────────────
-// FIX CRÍTICO UX — el zoom-out que reportaste.
-// Causa: <MapFit points={points} /> recibía `points` como prop. Cada vez que el
-// usuario clasificaba un punto, `handleSave` llamaba setTrips → nuevo array de
-// trips → nuevo array de points → React detectaba cambio en la prop → el
-// useEffect dentro de MapFit disparaba map.fitBounds() → ZOOM OUT.
-//
-// Solución: MapFit solo dispara fitBounds UNA VEZ, al montar (cuando el
-// componente aparece por primera vez con los puntos del viaje). Nunca más.
-// Usamos una ref para garantizar que fitBounds se llame solo en el primer render
-// con puntos válidos, y nunca por actualizaciones de clasificación.
-//
-// Adicionalmente: si el usuario cambia de viaje (tripIdx cambia), el componente
-// se desmonta y remonta con key={tripIdx}, por lo que el fit ocurre correctamente
-// para el nuevo viaje también.
+// ─── MAP FIT (solo al montar, nunca en clasificaciones) ───────────────────────
 function MapFit({ points }) {
-  const map = useMap();
+  const map    = useMap();
   const fitted = useRef(false);
-
   useEffect(() => {
-    // Solo fitear una vez por montaje del componente
     if (fitted.current || !points?.length) return;
-    const lats = points.map(p => p.lat);
-    const lons = points.map(p => p.lon);
-    const minLat = Math.min(...lats);
-    const maxLat = Math.max(...lats);
-    const minLon = Math.min(...lons);
-    const maxLon = Math.max(...lons);
-    // Validar que las coordenadas sean números reales antes de fitBounds
-    if ([minLat, maxLat, minLon, maxLon].some(v => !Number.isFinite(v))) return;
-    map.fitBounds(
-      [[minLat - 0.05, minLon - 0.05], [maxLat + 0.05, maxLon + 0.05]],
-      { padding: [20, 20], maxZoom: 13 }
-    );
+    const lats = points.map(p => p.lat), lons = points.map(p => p.lon);
+    const minLat = Math.min(...lats), maxLat = Math.max(...lats);
+    const minLon = Math.min(...lons), maxLon = Math.max(...lons);
+    if ([minLat,maxLat,minLon,maxLon].some(v => !Number.isFinite(v))) return;
+    map.fitBounds([[minLat-.05,minLon-.05],[maxLat+.05,maxLon+.05]],{padding:[20,20],maxZoom:13});
     fitted.current = true;
-  // Solo depende del map — intencionalmente NO incluimos points en deps
-  // para que el efecto no se repita cuando cambian los datos de clasificación.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [map]);
-
   return null;
 }
 
-// ─── MODAL DE CLASIFICACIÓN ───────────────────────────────────────────────────
-// FIX UX: múltiples mejoras al modal que se ve en las capturas de pantalla.
-// 1. SOG nulo se muestra como "—" en lugar de "null kn"
-// 2. Timestamp siempre en 24h UTC
-// 3. Botones de tipo de servicio tienen estado visual más claro (selected vs not)
-// 4. Tecla Escape cierra el modal
-// 5. Focus queda dentro del modal (trap) para no romper navegación por teclado
-const SVCS_CLASIFICABLES = ["AGUA", "SLOP", "LUBRICANTES", "ALIJO_ZC", "ALIJO_ZA", "ALIJO_ZD"];
-const ZONAS_OP = ["ZONA_COMUN", "ZONA_ALFA", "ZONA_DELTA", "RECALADA", "KM171"];
+// ─── CONSTANTES ───────────────────────────────────────────────────────────────
+const SVCS_CLASIFICABLES = ["AGUA","SLOP","LUBRICANTES","ALIJO_ZC","ALIJO_ZA","ALIJO_ZD"];
+const ZONAS_OP = ["ZONA_COMUN","ZONA_ALFA","ZONA_DELTA","RECALADA","KM171"];
+const GAP_UMBRAL_HS = 2; // UX-19: gap en datos AIS
 
+// ─── SERVICE EDITOR MODAL ────────────────────────────────────────────────────
 function ServiceEditor({ point, onSave, onClose, maxSvcNum }) {
-  const [svc,    setSvc]    = useState(point.tipo_servicio && !["SIN_CLASIFICAR", "BORRADO"].includes(point.tipo_servicio) ? point.tipo_servicio : "AGUA");
-  const [zona,   setZona]   = useState(point.zona_servicio && ZONAS_OP.includes(point.zona_servicio) ? point.zona_servicio : "ZONA_COMUN");
+  const [svc,    setSvc]    = useState(
+    point.tipo_servicio && !["SIN_CLASIFICAR","BORRADO"].includes(point.tipo_servicio)
+      ? point.tipo_servicio : "AGUA"
+  );
+  const [zona,   setZona]   = useState(
+    point.zona_servicio && ZONAS_OP.includes(point.zona_servicio)
+      ? point.zona_servicio : "ZONA_COMUN"
+  );
   const [svcNum, setSvcNum] = useState(point.servicio_num ?? null);
 
-  // Opciones de número de servicio: los existentes + uno nuevo
-  const svcNums = Array.from({ length: (maxSvcNum || 0) + 1 }, (_, i) => i + 1);
+  const svcNums = Array.from({ length: (maxSvcNum||0)+1 }, (_,i) => i+1);
 
-  // FIX UX: Escape cierra el modal
   useEffect(() => {
-    const handler = (e) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
+    const h = e => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
   }, [onClose]);
 
-  const sogDisplay = point.sog !== null && point.sog !== undefined
-    ? `${Number(point.sog).toFixed(1)} kn`
-    : "SOG —";
-
-  const handleConfirm = () => {
-    onSave({
-      ...point,
-      tipo_servicio: svcNum === null ? "BORRADO" : svc,
-      zona_servicio: zona,
-      servicio_num:  svcNum,
-    });
-  };
+  const sogDisplay = point.sog != null ? `${Number(point.sog).toFixed(1)} kn` : "SOG —";
 
   return (
-    // FIX UX: overlay con pointer-events bloqueados al scroll del mapa detrás
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="Clasificar punto de servicio"
-      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.45)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
-      onClick={onClose}
-    >
-      <div
-        style={{ background: "#fff", borderRadius: 14, padding: 22, width: "100%", maxWidth: 360, boxShadow: "0 20px 60px rgba(0,0,0,.25)" }}
-        onClick={e => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div style={{ fontSize: 14, fontWeight: 700, color: "#213363", marginBottom: 2 }}>
-          Clasificar punto
-        </div>
-        <div style={{ fontSize: 10, color: "#6381A7", fontFamily: "var(--mono)", marginBottom: 16 }}>
-          {/* FIX UX: 24h UTC explícito */}
+    <div role="dialog" aria-modal="true"
+      style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",zIndex:9999,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}
+      onClick={onClose}>
+      <div style={{background:"#fff",borderRadius:14,padding:22,width:"100%",maxWidth:360,boxShadow:"0 20px 60px rgba(0,0,0,.25)"}}
+        onClick={e=>e.stopPropagation()}>
+        <div style={{fontSize:14,fontWeight:700,color:"#213363",marginBottom:2}}>Clasificar punto</div>
+        <div style={{fontSize:10,color:"#6381A7",fontFamily:"var(--mono)",marginBottom:16}}>
           {fmtDatetime(point.datetime)} · {sogDisplay} · {point.zone}
         </div>
 
-        {/* Número de servicio */}
-        <div style={{ fontSize: 10, fontWeight: 600, color: "#6381A7", textTransform: "uppercase", letterSpacing: ".8px", marginBottom: 8 }}>
-          Número de servicio
-        </div>
-        <div style={{ display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
-          <button
-            style={{
-              padding: "7px 12px", borderRadius: 6, fontSize: 11, cursor: "pointer", fontWeight: svcNum === null ? 700 : 400,
-              border: `1px solid ${svcNum === null ? "#EF5350" : "#D6E0ED"}`,
-              background: svcNum === null ? "#FFF5F5" : "#fff",
-              color: svcNum === null ? "#C0392B" : "#6381A7",
-            }}
-            onClick={() => setSvcNum(null)}
-          >
-            ✕ No es servicio
-          </button>
-          {svcNums.map(n => (
-            <button
-              key={n}
-              style={{
-                padding: "7px 14px", borderRadius: 6, fontSize: 11, cursor: "pointer", fontWeight: svcNum === n ? 700 : 400,
-                border: `1px solid ${svcNum === n ? svcColor(n) : "#D6E0ED"}`,
-                background: svcNum === n ? `${svcColor(n)}18` : "#fff",
-                color: svcNum === n ? svcColor(n) : "#213363",
-              }}
-              onClick={() => {
-                setSvcNum(n);
-                // Si venía de BORRADO/SIN_CLASIFICAR, pre-seleccionar AGUA como default
-                if (!svc || svc === "BORRADO" || svc === "SIN_CLASIFICAR") setSvc("AGUA");
-              }}
-            >
-              S{n}{n === (maxSvcNum || 0) + 1 ? " (nuevo)" : ""}
+        <div style={{fontSize:10,fontWeight:600,color:"#6381A7",textTransform:"uppercase",letterSpacing:".8px",marginBottom:8}}>Número de servicio</div>
+        <div style={{display:"flex",gap:6,marginBottom:14,flexWrap:"wrap"}}>
+          <button style={{padding:"7px 12px",borderRadius:6,fontSize:11,cursor:"pointer",fontWeight:svcNum===null?700:400,border:`1px solid ${svcNum===null?"#EF5350":"#D6E0ED"}`,background:svcNum===null?"#FFF5F5":"#fff",color:svcNum===null?"#C0392B":"#6381A7"}}
+            onClick={()=>setSvcNum(null)}>✕ No es servicio</button>
+          {svcNums.map(n=>(
+            <button key={n} style={{padding:"7px 14px",borderRadius:6,fontSize:11,cursor:"pointer",fontWeight:svcNum===n?700:400,border:`1px solid ${svcNum===n?svcColor(n):"#D6E0ED"}`,background:svcNum===n?`${svcColor(n)}18`:"#fff",color:svcNum===n?svcColor(n):"#213363"}}
+              onClick={()=>{setSvcNum(n);if(!svc||["BORRADO","SIN_CLASIFICAR"].includes(svc))setSvc("AGUA");}}>
+              S{n}{n===(maxSvcNum||0)+1?" (nuevo)":""}
             </button>
           ))}
         </div>
 
-        {/* Tipo y zona — solo si es servicio */}
-        {svcNum !== null && (
-          <>
-            <div style={{ fontSize: 10, fontWeight: 600, color: "#6381A7", textTransform: "uppercase", letterSpacing: ".8px", marginBottom: 8 }}>
-              Tipo de servicio
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 5, marginBottom: 14 }}>
-              {SVCS_CLASIFICABLES.map(s => {
-                const info = SERVICE_TYPES[s];
-                const selected = svc === s;
-                return (
-                  <button
-                    key={s}
-                    style={{
-                      padding: "8px 6px", borderRadius: 6, fontSize: 10, cursor: "pointer", textAlign: "center",
-                      border: `1.5px solid ${selected ? info.color : "#D6E0ED"}`,
-                      background: selected ? `${info.color}18` : "#fff",
-                      color: selected ? info.color : "#213363",
-                      fontWeight: selected ? 700 : 400,
-                      transition: "all .12s",
-                    }}
-                    onClick={() => setSvc(s)}
-                  >
-                    {info.label}
-                  </button>
-                );
-              })}
-            </div>
+        {svcNum!==null&&<>
+          <div style={{fontSize:10,fontWeight:600,color:"#6381A7",textTransform:"uppercase",letterSpacing:".8px",marginBottom:8}}>Tipo de servicio</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5,marginBottom:14}}>
+            {SVCS_CLASIFICABLES.map(s=>{
+              const info=SERVICE_TYPES[s], sel=svc===s;
+              return <button key={s} style={{padding:"8px 6px",borderRadius:6,fontSize:10,cursor:"pointer",textAlign:"center",border:`1.5px solid ${sel?info.color:"#D6E0ED"}`,background:sel?`${info.color}18`:"#fff",color:sel?info.color:"#213363",fontWeight:sel?700:400,transition:"all .12s"}}
+                onClick={()=>setSvc(s)}>{info.label}</button>;
+            })}
+          </div>
+          <div style={{fontSize:10,fontWeight:600,color:"#6381A7",textTransform:"uppercase",letterSpacing:".8px",marginBottom:8}}>Zona operativa</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5,marginBottom:16}}>
+            {ZONAS_OP.map(z=>{const sel=zona===z;return<button key={z} style={{padding:"7px 8px",borderRadius:6,fontSize:10,cursor:"pointer",textAlign:"center",border:`1.5px solid ${sel?"#235C96":"#D6E0ED"}`,background:sel?"#EFF6FF":"#fff",color:sel?"#235C96":"#213363",fontWeight:sel?600:400,transition:"all .12s"}}
+              onClick={()=>setZona(z)}>{z.replace(/_/g," ")}</button>;})}
+          </div>
+        </>}
 
-            <div style={{ fontSize: 10, fontWeight: 600, color: "#6381A7", textTransform: "uppercase", letterSpacing: ".8px", marginBottom: 8 }}>
-              Zona operativa
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 5, marginBottom: 16 }}>
-              {ZONAS_OP.map(z => {
-                const selected = zona === z;
-                return (
-                  <button
-                    key={z}
-                    style={{
-                      padding: "7px 8px", borderRadius: 6, fontSize: 10, cursor: "pointer", textAlign: "center",
-                      border: `1.5px solid ${selected ? "#235C96" : "#D6E0ED"}`,
-                      background: selected ? "#EFF6FF" : "#fff",
-                      color: selected ? "#235C96" : "#213363",
-                      fontWeight: selected ? 600 : 400,
-                      transition: "all .12s",
-                    }}
-                    onClick={() => setZona(z)}
-                  >
-                    {z.replace(/_/g, " ")}
-                  </button>
-                );
-              })}
-            </div>
-          </>
-        )}
-
-        {/* Acciones */}
-        <div style={{ display: "flex", gap: 7 }}>
-          <button
-            style={{ flex: 1, padding: "9px 0", borderRadius: 7, background: "#235C96", color: "#fff", border: "none", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
-            onClick={handleConfirm}
-          >
-            ✓ Confirmar
-          </button>
-          <button
-            style={{ padding: "9px 12px", borderRadius: 7, border: "1px solid #D6E0ED", background: "#fff", color: "#6381A7", fontSize: 11, cursor: "pointer" }}
-            onClick={onClose}
-          >
-            Cancelar
-          </button>
+        <div style={{display:"flex",gap:7}}>
+          <button style={{flex:1,padding:"9px 0",borderRadius:7,background:"#235C96",color:"#fff",border:"none",fontSize:12,fontWeight:600,cursor:"pointer"}}
+            onClick={()=>onSave({...point,tipo_servicio:svcNum===null?"BORRADO":svc,zona_servicio:zona,servicio_num:svcNum})}>
+            ✓ Confirmar</button>
+          <button style={{padding:"9px 12px",borderRadius:7,border:"1px solid #D6E0ED",background:"#fff",color:"#6381A7",fontSize:11,cursor:"pointer"}}
+            onClick={onClose}>Cancelar</button>
         </div>
       </div>
     </div>
@@ -250,474 +128,527 @@ function ServiceEditor({ point, onSave, onClose, maxSvcNum }) {
 }
 
 // ─── COMPONENTE PRINCIPAL ─────────────────────────────────────────────────────
-export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) {
-  const [tripIdx, setTripIdx] = useState(initialIdx);
-  const [selPt,   setSelPt]   = useState(null);
-  const [editing, setEditing] = useState(null);
-  const [filter,  setFilter]  = useState("ALL");
-  const [saving,  setSaving]  = useState(false);
-  // FIX UX: feedback de guardado exitoso/fallido en lugar de solo "Guardando..."
-  const [saveStatus, setSaveStatus] = useState(null); // null | "ok" | "error"
+export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
+  const [tripIdx,    setTripIdx]    = useState(initialIdx);
+  const [selPt,      setSelPt]      = useState(null);
+  const [editing,    setEditing]    = useState(null);
+  const [filter,     setFilter]     = useState("ALL");
+  const [saving,     setSaving]     = useState(false);
+  const [saveStatus, setSaveStatus] = useState(null);
+  // UX-14: filtro de lista
+  const [listFilter, setListFilter] = useState("PENDING");
 
   const trip   = trips[tripIdx];
   const points = trip?.points || [];
 
-  // FIX: filtros correctamente nombrados y con lógica consistente
-  const visible = (() => {
-    if (filter === "SVC") return points.filter(p => p.state === "WORKING_STOP");
-    if (filter === "MOV") return points.filter(p => p.state !== "IN_PORT");
-    return points;
-  })();
-
-  // Segmentos de ruta (polylines entre puntos consecutivos, coloreados por estado)
-  const segments = [];
-  for (let i = 0; i < points.length - 1; i++) {
-    segments.push({
-      pos:   [[points[i].lat, points[i].lon], [points[i + 1].lat, points[i + 1].lon]],
-      color: STATES[points[i].state]?.color || "#999",
-    });
-  }
-
-  // maxSvcNum: máximo número de servicio asignado en este viaje
-  const maxSvcNum = Math.max(0, ...points.map(p => p.servicio_num || 0));
-
-  // ── handleSave ──
-  // FIX: la actualización en memoria se hace sobre el trip correcto usando tripIdx
-  // de la closure del useCallback. El estado newTrips se pasa a setTrips para que
-  // App.jsx sincronice (y eventualmente persista a Supabase en update de viaje).
-  //
-  // FIX PERSISTENCIA: el update en Supabase ahora usa TANTO trip_id COMO datetime
-  // para identificar el punto de forma inequívoca (datetime puede no ser único dentro
-  // de un upload si el archivo tiene duplicados — ver auditoría).
-  // FIX: el update incluye servicio_num además de tipo_servicio y zona_servicio.
-  const handleSave = useCallback(async (updated) => {
-    setSaving(true);
-    setSaveStatus(null);
-
-    const newTrips = trips.map((t, ti) => {
-      if (ti !== tripIdx) return t;
-      const newPoints = t.points.map((p, pi) => pi === editing.idx ? updated : p);
-      // nServices = cantidad de números de servicio únicos asignados (excluye BORRADO)
-      const servicios = new Set(
-        newPoints
-          .filter(p => p.servicio_num != null && p.tipo_servicio !== "BORRADO")
-          .map(p => p.servicio_num)
-      );
-      return { ...t, points: newPoints, nServices: servicios.size };
-    });
-
-    setTrips(newTrips);
-    setEditing(null);
-    setSelPt(null);
-
-    // Persistir a Supabase
-    try {
-      const currentTrip = newTrips[tripIdx];
-      if (currentTrip?.supabaseId) {
-        const datetimeStr = updated.datetime instanceof Date
-          ? updated.datetime.toISOString()
-          : new Date(updated.datetime).toISOString();
-
-        const { error } = await supabase
-          .from("ais_points")
-          .update({
-            tipo_servicio: updated.tipo_servicio,
-            zona_servicio: updated.zona_servicio,
-            servicio_num:  updated.servicio_num,   // FIX: persistir servicio_num
-          })
-          .eq("trip_id", currentTrip.supabaseId)
-          .eq("datetime", datetimeStr);
-
-        if (error) throw error;
-
-        // FIX: actualizar también n_services en ais_trips para consistencia
-        await supabase
-          .from("ais_trips")
-          .update({ n_services: newTrips[tripIdx].nServices })
-          .eq("id", currentTrip.supabaseId);
-      }
-      setSaveStatus("ok");
-    } catch (e) {
-      console.error("[TripViewer] Error guardando clasificación:", e);
-      setSaveStatus("error");
-    } finally {
-      setSaving(false);
-      // Limpiar el status después de 2.5 segundos
-      setTimeout(() => setSaveStatus(null), 2500);
-    }
-  }, [trips, tripIdx, editing, setTrips]);
-
-  // ── markValidated ──
-  // FIX: markValidated usa el trip actual del array newTrips para el supabaseId,
-  // no el trip del closure original (que puede estar desactualizado si hubo saves).
-  const markValidated = useCallback(async () => {
-    const newTrips = trips.map((t, i) => i === tripIdx ? { ...t, validated: true } : t);
-    setTrips(newTrips);
-
-    const currentTrip = newTrips[tripIdx];
-    if (currentTrip?.supabaseId) {
-      const { error } = await supabase
-        .from("ais_trips")
-        .update({ validated: true })
-        .eq("id", currentTrip.supabaseId);
-      if (error) console.error("[TripViewer] Error marcando validado:", error.message);
-    }
-
-    // Avanzar al siguiente viaje no validado
-    const nextUnvalidated = newTrips.findIndex((t, i) => i > tripIdx && !t.validated);
-    if (nextUnvalidated !== -1) {
-      setTripIdx(nextUnvalidated);
-    } else if (tripIdx < trips.length - 1) {
-      setTripIdx(i => i + 1);
-    }
-  }, [trips, tripIdx, setTrips]);
-
-  // ── Navegación entre viajes: limpiar estado de selección ──
-  const goTrip = useCallback((newIdx) => {
+  // UX-03: resetear filtro al cambiar de viaje
+  const goTrip = useCallback(newIdx => {
     setTripIdx(newIdx);
     setSelPt(null);
     setEditing(null);
-    setFilter("ALL");
+    setFilter("ALL"); // UX-03: siempre "Todo" al entrar a un viaje nuevo
   }, []);
 
-  // ── Estilos ──
+  // UX-05: próximo pendiente
+  const goNextPending = useCallback(() => {
+    const idx = trips.findIndex((t,i) => i > tripIdx && !t.validated);
+    if (idx !== -1) goTrip(idx);
+  }, [trips, tripIdx, goTrip]);
+
+  const goPrevPending = useCallback(() => {
+    let idx = -1;
+    for (let i = tripIdx-1; i >= 0; i--) { if (!trips[i].validated) { idx=i; break; } }
+    if (idx !== -1) goTrip(idx);
+  }, [trips, tripIdx, goTrip]);
+
+  const hasPrevPending = trips.slice(0,tripIdx).some(t=>!t.validated);
+  const hasNextPending = trips.slice(tripIdx+1).some(t=>!t.validated);
+
+  // UX-05: atajos de teclado N / P / V / Escape
+  useEffect(() => {
+    const h = e => {
+      if (editing) return; // modal abierto — no interferir
+      if (e.target.tagName==="INPUT"||e.target.tagName==="TEXTAREA") return;
+      if (e.key==="n"||e.key==="N") goNextPending();
+      if (e.key==="p"||e.key==="P") goPrevPending();
+      if ((e.key==="v"||e.key==="V") && trip && !trip.validated) markValidated();
+      if (e.key==="Escape") onBack();
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing, tripIdx, trips]);
+
+  // Puntos visibles según filtro
+  const visible = useMemo(() => {
+    if (filter==="SVC") return points.filter(p=>p.state==="WORKING_STOP");
+    if (filter==="MOV") return points.filter(p=>p.state!=="IN_PORT");
+    return points;
+  }, [points, filter]);
+
+  // Segmentos de ruta
+  const segments = useMemo(() => {
+    const segs=[];
+    for (let i=0;i<points.length-1;i++) {
+      segs.push({pos:[[points[i].lat,points[i].lon],[points[i+1].lat,points[i+1].lon]],color:STATES[points[i].state]?.color||"#999"});
+    }
+    return segs;
+  }, [points]);
+
+  // UX-11: contador de clasificación en ZC
+  const zcPoints      = useMemo(()=>points.filter(p=>p.zone==="ZONA_COMUN"&&p.state==="WORKING_STOP"),[points]);
+  const zcClasificados= useMemo(()=>zcPoints.filter(p=>p.servicio_num!=null),[zcPoints]);
+  const zcFaltantes   = zcPoints.length - zcClasificados.length;
+
+  // UX-08: clusters de puntos consecutivos en ZC con SOG < 1 kn
+  const clusters = useMemo(() => {
+    const result=[];
+    let current=null;
+    points.forEach((p,i)=>{
+      const inCluster = p.zone==="ZONA_COMUN" && p.sog!=null && p.sog<1;
+      if (inCluster) {
+        if (!current) current={startIdx:i,endIdx:i,points:[p]};
+        else { current.endIdx=i; current.points.push(p); }
+      } else {
+        if (current&&current.points.length>=3) result.push({...current});
+        current=null;
+      }
+    });
+    if (current&&current.points.length>=3) result.push(current);
+    return result;
+  }, [points]);
+
+  const maxSvcNum = Math.max(0,...points.map(p=>p.servicio_num||0));
+
+  // handleSave
+  const handleSave = useCallback(async updated => {
+    setSaving(true); setSaveStatus(null);
+    const newTrips = trips.map((t,ti)=>{
+      if (ti!==tripIdx) return t;
+      const newPoints = t.points.map((p,pi)=>pi===editing.idx?updated:p);
+      const servicios = new Set(newPoints.filter(p=>p.servicio_num!=null&&p.tipo_servicio!=="BORRADO").map(p=>p.servicio_num));
+      return {...t, points:newPoints, nServices:servicios.size};
+    });
+    setTrips(newTrips); setEditing(null); setSelPt(null);
+    try {
+      const ct = newTrips[tripIdx];
+      if (ct?.supabaseId) {
+        const dtStr = updated.datetime instanceof Date ? updated.datetime.toISOString() : new Date(updated.datetime).toISOString();
+        const {error} = await supabase.from("ais_points")
+          .update({tipo_servicio:updated.tipo_servicio,zona_servicio:updated.zona_servicio,servicio_num:updated.servicio_num})
+          .eq("trip_id",ct.supabaseId).eq("datetime",dtStr);
+        if (error) throw error;
+        await supabase.from("ais_trips").update({n_services:newTrips[tripIdx].nServices}).eq("id",ct.supabaseId);
+      }
+      setSaveStatus("ok");
+    } catch(e) {
+      console.error("[TripViewer] Error guardando:",e);
+      setSaveStatus("error");
+    } finally {
+      setSaving(false);
+      setTimeout(()=>setSaveStatus(null),2500);
+    }
+  }, [trips, tripIdx, editing, setTrips]);
+
+  // markValidated con advertencia si hay ZC sin clasificar
+  const markValidated = useCallback(async () => {
+    if (zcFaltantes > 0) {
+      const ok = window.confirm(`Hay ${zcFaltantes} punto${zcFaltantes>1?"s":""} en Zona Común sin clasificar. ¿Validar igualmente?`);
+      if (!ok) return;
+    }
+    const newTrips = trips.map((t,i)=>i===tripIdx?{...t,validated:true}:t);
+    setTrips(newTrips);
+    const ct = newTrips[tripIdx];
+    if (ct?.supabaseId) {
+      const {error} = await supabase.from("ais_trips").update({validated:true}).eq("id",ct.supabaseId);
+      if (error) console.error("[TripViewer] Error validando:",error.message);
+    }
+    const next = newTrips.findIndex((t,i)=>i>tripIdx&&!t.validated);
+    if (next!==-1) goTrip(next);
+    else if (tripIdx<trips.length-1) goTrip(tripIdx+1);
+  }, [trips, tripIdx, setTrips, zcFaltantes, goTrip]);
+
   const S = {
-    btn: (active, color) => ({
-      fontSize: 11, padding: "5px 11px", borderRadius: 6,
-      border: `1px solid ${active ? (color || "#235C96") : "#D6E0ED"}`,
-      background: active ? (color ? "#fff" : "#EFF6FF") : "#fff",
-      color: active ? (color || "#235C96") : "#6381A7",
-      cursor: "pointer", fontFamily: "var(--sans)", fontWeight: active ? 600 : 400,
-    }),
-    fchip: active => ({
-      fontSize: 9, padding: "2px 7px", borderRadius: 10,
-      border: `1px solid ${active ? "#235C96" : "#D6E0ED"}`,
-      background: active ? "#EFF6FF" : "#fff",
-      color: active ? "#235C96" : "#6381A7",
-      cursor: "pointer", fontFamily: "var(--mono)",
-    }),
+    btn:(active,color)=>({fontSize:11,padding:"5px 11px",borderRadius:6,border:`1px solid ${active?(color||"#235C96"):"#D6E0ED"}`,background:active?(color?"#fff":"#EFF6FF"):"#fff",color:active?(color||"#235C96"):"#6381A7",cursor:"pointer",fontFamily:"var(--sans)",fontWeight:active?600:400}),
+    fchip:active=>({fontSize:9,padding:"2px 7px",borderRadius:10,border:`1px solid ${active?"#235C96":"#D6E0ED"}`,background:active?"#EFF6FF":"#fff",color:active?"#235C96":"#6381A7",cursor:"pointer",fontFamily:"var(--mono)"}),
   };
 
-  if (!trip) {
-    return (
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "calc(100vh - 52px)", color: "var(--muted)", fontSize: 13 }}>
-        No hay viaje seleccionado.
-      </div>
-    );
-  }
+  if (!trip) return <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"calc(100vh - 52px)",color:"var(--muted)",fontSize:13}}>No hay viaje seleccionado.</div>;
+
+  // UX-15: duración legible
+  const durLabel = fmtDuration(trip.durationHs);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 52px)" }}>
+    <div style={{display:"flex",flexDirection:"column",height:"calc(100vh - 52px)"}}>
 
-      {/* ── Topbar ── */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 16px", borderBottom: "1px solid #D6E0ED", background: "#fff", flexShrink: 0, flexWrap: "wrap" }}>
+      {/* ── TOPBAR ── */}
+      <div style={{display:"flex",alignItems:"center",gap:8,padding:"9px 16px",borderBottom:"1px solid #D6E0ED",background:"#fff",flexShrink:0,flexWrap:"wrap"}}>
         <button style={S.btn(false)} onClick={onBack}>← Lista</button>
-        <button
-          style={S.btn(false)}
-          onClick={() => goTrip(Math.max(0, tripIdx - 1))}
-          disabled={tripIdx === 0}
-          aria-label="Viaje anterior"
-        >
-          ‹
-        </button>
-        <span style={{ fontFamily: "var(--mono)", fontSize: 12, fontWeight: 700, color: "#213363" }}>
-          {/* FIX UX: mostrar ambas fechas con hora para cronología clara */}
-          Viaje #{trip.id} — {fmtDate(trip.dateStart)} {fmtTime(trip.dateStart)} → {fmtDate(trip.dateEnd)} {fmtTime(trip.dateEnd)} UTC
-          {trip.incomplete && (
-            <span style={{ marginLeft: 8, fontSize: 10, color: "#92400E", background: "#FEF3C7", padding: "1px 6px", borderRadius: 3 }}>
-              ⚠ Incompleto
-            </span>
-          )}
+        <button style={S.btn(false)} onClick={()=>goTrip(Math.max(0,tripIdx-1))} disabled={tripIdx===0} aria-label="Anterior">‹</button>
+
+        {/* UX-01: título siempre sincronizado con tripIdx — fuente única de verdad */}
+        <span style={{fontFamily:"var(--mono)",fontSize:11,fontWeight:700,color:"#213363"}}>
+          Viaje #{trip.id}
+          {" — "}
+          {fmtDate(trip.dateStart)} {fmtTime(trip.dateStart)} → {fmtDate(trip.dateEnd)} {fmtTime(trip.dateEnd)} UTC
+          {/* UX-15: duración explícita */}
+          <span style={{marginLeft:6,fontSize:10,color:"#6381A7",fontWeight:400}}>({durLabel})</span>
+          {trip.incomplete&&<span style={{marginLeft:8,fontSize:9,color:"#92400E",background:"#FEF3C7",padding:"1px 6px",borderRadius:3}}>⚠ Incompleto</span>}
         </span>
-        <button
-          style={S.btn(false)}
-          onClick={() => goTrip(Math.min(trips.length - 1, tripIdx + 1))}
-          disabled={tripIdx === trips.length - 1}
-          aria-label="Viaje siguiente"
-        >
-          ›
-        </button>
 
-        {/* Feedback de guardado */}
-        {saving && (
-          <span style={{ fontSize: 10, color: "#6381A7", fontFamily: "var(--mono)" }}>
-            Guardando…
-          </span>
-        )}
-        {saveStatus === "ok" && (
-          <span style={{ fontSize: 10, color: "#1E7A4A", fontFamily: "var(--mono)" }}>
-            ✓ Guardado
-          </span>
-        )}
-        {saveStatus === "error" && (
-          <span style={{ fontSize: 10, color: "#C0392B", fontFamily: "var(--mono)" }}>
-            ⚠ Error al guardar
-          </span>
-        )}
+        <button style={S.btn(false)} onClick={()=>goTrip(Math.min(trips.length-1,tripIdx+1))} disabled={tripIdx===trips.length-1} aria-label="Siguiente">›</button>
 
-        <div style={{ marginLeft: "auto" }}>
-          {trip.validated ? (
-            <span style={{ fontSize: 11, color: "#1E7A4A", fontWeight: 600 }}>✓ Validado</span>
-          ) : (
-            <button
-              style={{ ...S.btn(true), background: "#1E7A4A", color: "#fff", borderColor: "#1E7A4A" }}
-              onClick={markValidated}
-            >
-              ✓ Marcar validado
-            </button>
-          )}
+        {/* UX-05: botones próximo/anterior pendiente */}
+        {hasPrevPending&&<button style={{...S.btn(false),fontSize:10}} onClick={goPrevPending} title="Atajo: P">‹ Pendiente</button>}
+        {hasNextPending&&<button style={{...S.btn(true),fontSize:10,background:"#FFF7ED",color:"#92400E",borderColor:"#FCD34D"}} onClick={goNextPending} title="Atajo: N">Pendiente ›</button>}
+
+        {saving&&<span style={{fontSize:10,color:"#6381A7",fontFamily:"var(--mono)"}}>Guardando…</span>}
+        {saveStatus==="ok"&&<span style={{fontSize:10,color:"#1E7A4A",fontFamily:"var(--mono)"}}>✓ Guardado</span>}
+        {saveStatus==="error"&&<span style={{fontSize:10,color:"#C0392B",fontFamily:"var(--mono)"}}>⚠ Error al guardar</span>}
+
+        {/* UX-05: atajo V = validar */}
+        <div style={{marginLeft:"auto"}}>
+          {trip.validated
+            ? <span style={{fontSize:11,color:"#1E7A4A",fontWeight:600}}>✓ Validado</span>
+            : <button style={{...S.btn(true),background:"#1E7A4A",color:"#fff",borderColor:"#1E7A4A"}} onClick={markValidated} title="Atajo: V">✓ Marcar validado</button>
+          }
         </div>
       </div>
 
-      {/* ── Body: mapa + panel derecho ── */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 300px", flex: 1, minHeight: 0 }}>
+      {/* UX-11: barra de progreso de clasificación en ZC */}
+      {zcPoints.length>0&&(
+        <div style={{padding:"5px 16px",background:zcFaltantes>0?"#FFFBEB":"#F0FFF4",borderBottom:"1px solid #EEF2F7",display:"flex",alignItems:"center",gap:10,flexShrink:0}}>
+          <span style={{fontSize:10,color:zcFaltantes>0?"#854F0B":"#065F46",fontFamily:"var(--mono)"}}>
+            ZC: {zcClasificados.length}/{zcPoints.length} clasificados
+            {zcFaltantes>0&&` — ${zcFaltantes} faltante${zcFaltantes>1?"s":""}`}
+          </span>
+          <div style={{flex:1,height:4,background:"#EEF2F7",borderRadius:2,overflow:"hidden",maxWidth:200}}>
+            <div style={{width:`${zcPoints.length?zcClasificados.length/zcPoints.length*100:0}%`,height:"100%",background:zcFaltantes>0?"#FFA726":"#22C55E",transition:"width .3s"}}/>
+          </div>
+          {/* UX-05: atajo teclado hint */}
+          <span style={{fontSize:9,color:"#A5B5CC",fontFamily:"var(--mono)"}}>N=sig.pendiente · V=validar · Esc=salir</span>
+        </div>
+      )}
+
+      {/* ── BODY ── */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 300px",flex:1,minHeight:0}}>
 
         {/* ── MAPA ── */}
-        {/* FIX CRÍTICO: key={tripIdx} fuerza desmonte/remonte del MapContainer
-            al cambiar de viaje. Esto garantiza que MapFit fitee correctamente
-            el nuevo viaje y que el mapa no mantenga estado del viaje anterior. */}
-        <div style={{ position: "relative", height: "100%" }}>
-          <MapContainer
-            key={tripIdx}
-            center={[-34.7, -58.0]}
-            zoom={9}
-            style={{ height: "100%", width: "100%" }}
-          >
-            <TileLayer
-              attribution="© OpenStreetMap contributors"
-              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-            />
-            {/* MapFit con ref interna — solo fita al montar, nunca en clasificaciones */}
-            <MapFit points={points} />
+        <div style={{position:"relative",height:"100%"}}>
+          <MapContainer key={tripIdx} center={[-34.7,-58.0]} zoom={9} style={{height:"100%",width:"100%"}}>
+            <TileLayer attribution="© OpenStreetMap contributors" url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"/>
+            <MapFit points={points}/>
 
-            {/* Polígonos de zonas operativas */}
-            {Object.entries(ZONES).map(([key, z]) => (
-              <Polyline
-                key={key}
-                positions={[...z.polygon.map(([a, b]) => [a, b]), [z.polygon[0][0], z.polygon[0][1]]]}
-                color={z.color}
-                weight={1.5}
-                opacity={0.6}
-                dashArray="4,4"
-              />
+            {/* UX-16: zonas con relleno semitransparente + tooltip */}
+            {Object.entries(ZONES).map(([key,z])=>(
+              <Polygon key={key}
+                positions={z.polygon.map(([a,b])=>[a,b])}
+                pathOptions={{color:z.color,weight:1.5,opacity:0.7,fillColor:z.color,fillOpacity:0.08,dashArray:"4,4"}}>
+                <Popup><strong>{z.label}</strong></Popup>
+              </Polygon>
             ))}
 
-            {/* Ruta del viaje */}
-            {segments.map((s, i) => (
-              <Polyline key={i} positions={s.pos} color={s.color} weight={3} opacity={0.85} />
-            ))}
+            {/* Ruta */}
+            {segments.map((s,i)=><Polyline key={i} positions={s.pos} color={s.color} weight={3} opacity={0.85}/>)}
 
-            {/* Puntos WORKING_STOP — clasificables */}
-            {points.map((p, i) => {
-              if (p.state !== "WORKING_STOP") return null;
-              const col = p.servicio_num != null ? svcColor(p.servicio_num) : "#9E9E9E";
-              const isSelected = selPt === i;
+            {/* Puntos WORKING_STOP */}
+            {points.map((p,i)=>{
+              if (p.state!=="WORKING_STOP") return null;
+              const col = p.servicio_num!=null?svcColor(p.servicio_num):"#9E9E9E";
+              const isSel = selPt===i;
               return (
-                <CircleMarker
-                  key={i}
-                  center={[p.lat, p.lon]}
-                  radius={isSelected ? 10 : 8}
-                  color={isSelected ? "#fff" : col}
-                  weight={isSelected ? 3 : 2}
-                  fillColor={col}
-                  fillOpacity={0.9}
-                  eventHandlers={{
-                    click: () => {
-                      setSelPt(i);
-                      setEditing({ idx: i, pt: p });
-                    },
-                  }}
-                >
+                <CircleMarker key={i} center={[p.lat,p.lon]} radius={isSel?10:8}
+                  color={isSel?"#fff":col} weight={isSel?3:2} fillColor={col} fillOpacity={0.9}
+                  eventHandlers={{click:()=>{setSelPt(i);setEditing({idx:i,pt:p});}}}>
                   <Popup>
-                    <div style={{ fontSize: 12, minWidth: 180 }}>
-                      {/* FIX UX: 24h UTC en popup */}
-                      <strong>{fmtDatetime(p.datetime)}</strong><br />
-                      SOG: {p.sog !== null ? `${Number(p.sog).toFixed(1)} kn` : "—"} | {p.zone}<br />
+                    <div style={{fontSize:12,minWidth:180}}>
+                      <strong>{fmtDatetime(p.datetime)}</strong><br/>
+                      SOG: {p.sog!=null?`${Number(p.sog).toFixed(1)} kn`:"—"} | {p.zone}<br/>
                       {STATES[p.state]?.label}
-                      {p.servicio_num != null && p.tipo_servicio && !["SIN_CLASIFICAR", "BORRADO"].includes(p.tipo_servicio) && (
-                        <>
-                          <br />
-                          <em style={{ color: col }}>
-                            S{p.servicio_num} · {SERVICE_TYPES[p.tipo_servicio]?.label}
-                          </em>
-                        </>
+                      {p.servicio_num!=null&&p.tipo_servicio&&!["SIN_CLASIFICAR","BORRADO"].includes(p.tipo_servicio)&&(
+                        <><br/><em style={{color:col}}>S{p.servicio_num} · {SERVICE_TYPES[p.tipo_servicio]?.label}</em></>
                       )}
-                      <button
-                        style={{ marginTop: 7, width: "100%", padding: "6px 0", borderRadius: 6, background: "#235C96", color: "#fff", border: "none", fontSize: 11, cursor: "pointer", fontWeight: 600 }}
-                        onClick={() => setEditing({ idx: i, pt: p })}
-                      >
-                        ✏ Clasificar
-                      </button>
+                      <button style={{marginTop:7,width:"100%",padding:"6px 0",borderRadius:6,background:"#235C96",color:"#fff",border:"none",fontSize:11,cursor:"pointer",fontWeight:600}}
+                        onClick={()=>setEditing({idx:i,pt:p})}>✏ Clasificar</button>
                     </div>
                   </Popup>
                 </CircleMarker>
               );
             })}
 
-            {/* Marcadores de inicio y fin */}
-            {points.length > 0 && (
-              <>
-                <CircleMarker
-                  center={[points[0].lat, points[0].lon]}
-                  radius={8} color="#fff" weight={3} fillColor="#213363" fillOpacity={1}
-                >
-                  <Popup>
-                    <strong>Zarpe</strong><br />
-                    {fmtDate(trip.dateStart)} {fmtTime(trip.dateStart)} UTC
-                  </Popup>
-                </CircleMarker>
-                <CircleMarker
-                  center={[points[points.length - 1].lat, points[points.length - 1].lon]}
-                  radius={8} color="#fff" weight={3}
-                  fillColor={trip.incomplete ? "#F59E0B" : "#1E7A4A"}
-                  fillOpacity={1}
-                >
-                  <Popup>
-                    <strong>{trip.incomplete ? "⚠ Fin de datos (incompleto)" : "Arribo"}</strong><br />
-                    {fmtDate(trip.dateEnd)} {fmtTime(trip.dateEnd)} UTC
-                  </Popup>
-                </CircleMarker>
-              </>
-            )}
+            {/* UX-12: marcadores inicio/fin con etiqueta S/F */}
+            {points.length>0&&<>
+              <CircleMarker center={[points[0].lat,points[0].lon]} radius={9} color="#fff" weight={3} fillColor="#213363" fillOpacity={1}>
+                <Popup><strong>S — Zarpe</strong><br/>{fmtDate(trip.dateStart)} {fmtTime(trip.dateStart)} UTC</Popup>
+              </CircleMarker>
+              <CircleMarker center={[points[points.length-1].lat,points[points.length-1].lon]} radius={9} color="#fff" weight={3} fillColor={trip.incomplete?"#F59E0B":"#DC2626"} fillOpacity={1}>
+                <Popup><strong>{trip.incomplete?"⚠ Fin de datos":"F — Arribo"}</strong><br/>{fmtDate(trip.dateEnd)} {fmtTime(trip.dateEnd)} UTC</Popup>
+              </CircleMarker>
+            </>}
           </MapContainer>
         </div>
 
         {/* ── PANEL DERECHO ── */}
-        <div style={{ display: "flex", flexDirection: "column", borderLeft: "1px solid #D6E0ED", background: "#fff", overflow: "hidden" }}>
+        <div style={{display:"flex",flexDirection:"column",borderLeft:"1px solid #D6E0ED",background:"#fff",overflow:"hidden"}}>
 
           {/* Info del viaje */}
-          <div style={{ padding: "12px 14px", borderBottom: "1px solid #D6E0ED", background: "#F8FAFC", flexShrink: 0 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: "#213363" }}>
+          <div style={{padding:"10px 14px",borderBottom:"1px solid #D6E0ED",background:"#F8FAFC",flexShrink:0}}>
+            <div style={{fontSize:13,fontWeight:700,color:"#213363"}}>
               Viaje #{trip.id}
-              {trip.incomplete && (
-                <span style={{ marginLeft: 6, fontSize: 9, background: "#FEF3C7", color: "#92400E", padding: "1px 5px", borderRadius: 3 }}>
-                  INCOMPLETO
-                </span>
-              )}
+              {trip.incomplete&&<span style={{marginLeft:6,fontSize:9,background:"#FEF3C7",color:"#92400E",padding:"1px 5px",borderRadius:3}}>INCOMPLETO</span>}
             </div>
-            {/* FIX UX: hora en 24h UTC */}
-            <div style={{ fontSize: 10, color: "#6381A7", fontFamily: "var(--mono)", marginTop: 1, lineHeight: 1.5 }}>
-              {fmtDate(trip.dateStart)} {fmtTime(trip.dateStart)}<br />
+            <div style={{fontSize:10,color:"#6381A7",fontFamily:"var(--mono)",marginTop:1,lineHeight:1.5}}>
+              {fmtDate(trip.dateStart)} {fmtTime(trip.dateStart)}<br/>
               → {fmtDate(trip.dateEnd)} {fmtTime(trip.dateEnd)} UTC
             </div>
           </div>
 
-          {/* Stats del viaje */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 5, padding: "9px 12px", borderBottom: "1px solid #EEF2F7", flexShrink: 0 }}>
+          {/* Stats — UX-15: duración legible */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:5,padding:"9px 12px",borderBottom:"1px solid #EEF2F7",flexShrink:0}}>
             {[
-              { v: `${trip.durationHs?.toFixed(0)}h`,      l: "Duración" },
-              { v: trip.nServices || 0,                     l: "Servicios", c: "#1E7A4A" },
-              { v: `${trip.distNm ?? "—"} nm`,              l: "Distancia" },
-            ].map(k => (
-              <div key={k.l} style={{ background: "#EEF2F7", borderRadius: 6, padding: "6px 8px", textAlign: "center" }}>
-                <div style={{ fontSize: 14, fontWeight: 700, color: k.c || "#213363" }}>{k.v}</div>
-                <div style={{ fontSize: 9, color: "#6381A7", textTransform: "uppercase", letterSpacing: ".4px", marginTop: 1 }}>{k.l}</div>
+              {v:durLabel,            l:"Duración"},
+              {v:trip.nServices||0,   l:"Servicios", c:"#1E7A4A"},
+              {v:`${trip.distNm??"—"} nm`, l:"Distancia"},
+            ].map(k=>(
+              <div key={k.l} style={{background:"#EEF2F7",borderRadius:6,padding:"6px 8px",textAlign:"center"}}>
+                <div style={{fontSize:14,fontWeight:700,color:k.c||"#213363"}}>{k.v}</div>
+                <div style={{fontSize:9,color:"#6381A7",textTransform:"uppercase",letterSpacing:".4px",marginTop:1}}>{k.l}</div>
               </div>
             ))}
           </div>
 
-          {/* Filtros de puntos */}
-          <div style={{ padding: "7px 12px", display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "1px solid #EEF2F7", flexShrink: 0 }}>
-            <span style={{ fontSize: 9, fontWeight: 600, color: "#6381A7", textTransform: "uppercase", letterSpacing: 1 }}>
-              {visible.length} punto{visible.length !== 1 ? "s" : ""}
+          {/* UX-18: mini timeline de estados */}
+          <TripTimeline points={points} onSegmentClick={state=>{
+            if (state==="WORKING_STOP") setFilter("SVC");
+            else if (state==="IN_PORT") setFilter("ALL");
+            else setFilter("MOV");
+          }}/>
+
+          {/* UX-08: clusters detectados */}
+          {clusters.length>0&&(
+            <div style={{padding:"6px 12px",borderBottom:"1px solid #EEF2F7",flexShrink:0}}>
+              <div style={{fontSize:9,color:"#6381A7",textTransform:"uppercase",letterSpacing:1,marginBottom:4,fontFamily:"var(--mono)"}}>Clusters ZC detectados</div>
+              {clusters.map((c,ci)=>{
+                const durMs = points[c.endIdx].datetime - points[c.startIdx].datetime;
+                const durH  = (durMs/3600000).toFixed(1);
+                const allSameNum = c.points.every(p=>p.servicio_num===c.points[0].servicio_num&&c.points[0].servicio_num!=null);
+                return (
+                  <div key={ci} style={{display:"flex",alignItems:"center",gap:6,padding:"4px 0",borderBottom:ci<clusters.length-1?"1px solid #F5F7FA":"none"}}>
+                    <span style={{fontSize:9,padding:"1px 5px",borderRadius:3,background:allSameNum?`${svcColor(c.points[0].servicio_num)}18`:"#FEF3C7",color:allSameNum?svcColor(c.points[0].servicio_num):"#92400E",fontFamily:"var(--mono)"}}>
+                      {allSameNum?`S${c.points[0].servicio_num}`:"Sin clasificar"}
+                    </span>
+                    <span style={{fontSize:9,color:"#6381A7",fontFamily:"var(--mono)",flex:1}}>
+                      {c.points.length} pts · {durH}h
+                    </span>
+                    {!allSameNum&&(
+                      <button style={{fontSize:9,padding:"2px 6px",borderRadius:4,background:"#EFF6FF",color:"#235C96",border:"none",cursor:"pointer"}}
+                        onClick={()=>{setFilter("SVC");setSelPt(c.startIdx);setEditing({idx:c.startIdx,pt:points[c.startIdx]});}}>
+                        Clasificar
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Filtros */}
+          <div style={{padding:"7px 12px",display:"flex",alignItems:"center",justifyContent:"space-between",borderBottom:"1px solid #EEF2F7",flexShrink:0}}>
+            <span style={{fontSize:9,fontWeight:600,color:"#6381A7",textTransform:"uppercase",letterSpacing:1}}>
+              {visible.length} punto{visible.length!==1?"s":""}
             </span>
-            <div style={{ display: "flex", gap: 3 }}>
-              {[["ALL", "Todo"], ["SVC", "Svc"], ["MOV", "Mov"]].map(([f, l]) => (
-                <button key={f} style={S.fchip(filter === f)} onClick={() => setFilter(f)}>{l}</button>
+            <div style={{display:"flex",gap:3}}>
+              {[["ALL","Todo"],["SVC","Svc"],["MOV","Mov"]].map(([f,l])=>(
+                <button key={f} style={S.fchip(filter===f)} onClick={()=>setFilter(f)}>{l}</button>
               ))}
             </div>
           </div>
 
+          {/* UX-03: mensaje cuando filtro SVC no tiene resultados */}
+          {filter==="SVC"&&visible.length===0&&(
+            <div style={{padding:"16px 12px",textAlign:"center"}}>
+              <div style={{fontSize:11,color:"#6381A7",marginBottom:8}}>No hay puntos WORKING_STOP en este viaje.</div>
+              <button style={{fontSize:11,color:"#235C96",background:"none",border:"none",cursor:"pointer",textDecoration:"underline"}}
+                onClick={()=>setFilter("ALL")}>Ver todos los puntos →</button>
+            </div>
+          )}
+
           {/* Lista de puntos */}
-          <div style={{ flex: 1, overflowY: "auto" }}>
-            {visible.length === 0 && (
-              <div style={{ padding: "20px 12px", textAlign: "center", fontSize: 11, color: "#A5B5CC" }}>
-                No hay puntos {filter === "SVC" ? "WORKING_STOP" : ""} en este viaje.
-              </div>
-            )}
-            {visible.map((p, vi) => {
-              const realIdx = points.indexOf(p);
-              const isWS  = p.state === "WORKING_STOP";
-              const col   = isWS
-                ? (p.servicio_num != null ? svcColor(p.servicio_num) : "#9E9E9E")
-                : (STATES[p.state]?.color || "#999");
-              const isSel = selPt === realIdx;
-
-              return (
-                <div
-                  key={vi}
-                  role="button"
-                  tabIndex={0}
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "58px 42px 1fr 18px",
-                    gap: 5,
-                    padding: "6px 10px",
-                    borderBottom: "1px solid #F5F7FA",
-                    cursor: "pointer",
-                    alignItems: "center",
-                    background: isSel ? (isWS ? "#F0FFF4" : "#EFF6FF") : "transparent",
-                    borderLeft: isSel ? `3px solid ${isWS ? "#1E7A4A" : "#235C96"}` : "3px solid transparent",
-                  }}
-                  onClick={() => {
-                    setSelPt(realIdx);
-                    if (isWS) setEditing({ idx: realIdx, pt: p });
-                  }}
-                  onKeyDown={e => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      setSelPt(realIdx);
-                      if (isWS) setEditing({ idx: realIdx, pt: p });
-                    }
-                  }}
-                >
-                  {/* FIX UX: hora en 24h UTC */}
-                  <span style={{ fontFamily: "var(--mono)", fontSize: 9, color: "#6381A7", lineHeight: 1.3 }}>
-                    {fmtTime(p.datetime)}<br />
-                    <span style={{ fontSize: 8, color: "#A5B5CC" }}>{fmtDate(p.datetime)}</span>
-                  </span>
-
-                  {/* SOG — FIX UX: nulo mostrado como "—" */}
-                  <span style={{
-                    fontFamily: "var(--mono)", fontSize: 10, textAlign: "right",
-                    color: p.sog === null ? "#A5B5CC" : p.sog > 3 ? "#235C96" : p.sog <= 0.5 ? "#1E7A4A" : "#854F0B",
-                  }}>
-                    {p.sog !== null ? `${Number(p.sog).toFixed(1)}kn` : "—"}
-                  </span>
-
-                  {/* Etiqueta de estado / servicio */}
-                  <span style={{
-                    fontSize: 8, padding: "2px 5px", borderRadius: 3,
-                    background: `${col}18`, color: col,
-                    border: `1px solid ${col}44`,
-                    fontFamily: "var(--mono)",
-                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                  }}>
-                    {p.servicio_num != null
-                      ? `S${p.servicio_num}${p.tipo_servicio && !["SIN_CLASIFICAR", "BORRADO"].includes(p.tipo_servicio) ? ` · ${SERVICE_TYPES[p.tipo_servicio]?.label || ""}` : ""}`
-                      : (STATES[p.state]?.label || p.state)
-                    }
-                  </span>
-
-                  {/* Ícono de edición */}
-                  <span style={{ fontSize: 11, color: isSel ? "#235C96" : "#D6E0ED", textAlign: "center" }}>
-                    {isWS ? "✏" : ""}
-                  </span>
-                </div>
-              );
-            })}
+          <div style={{flex:1,overflowY:"auto"}}>
+            <PointsList
+              visible={visible}
+              points={points}
+              selPt={selPt}
+              setSelPt={setSelPt}
+              setEditing={setEditing}
+            />
           </div>
         </div>
       </div>
 
-      {/* ── Modal de clasificación ── */}
-      {editing && (
-        <ServiceEditor
-          point={editing.pt}
-          onSave={handleSave}
-          onClose={() => { setEditing(null); setSelPt(null); }}
-          maxSvcNum={maxSvcNum}
-        />
+      {editing&&(
+        <ServiceEditor point={editing.pt} onSave={handleSave}
+          onClose={()=>{setEditing(null);setSelPt(null);}} maxSvcNum={maxSvcNum}/>
       )}
     </div>
+  );
+}
+
+// ─── UX-18: MINI TIMELINE DE ESTADOS ─────────────────────────────────────────
+function TripTimeline({ points, onSegmentClick }) {
+  if (!points?.length) return null;
+  const total = points.length;
+  // Agrupar segmentos contiguos por estado
+  const segs = [];
+  let cur = null;
+  points.forEach((p,i) => {
+    if (!cur || cur.state!==p.state) {
+      if (cur) segs.push(cur);
+      cur = {state:p.state, count:1, color:STATES[p.state]?.color||"#ccc"};
+    } else { cur.count++; }
+  });
+  if (cur) segs.push(cur);
+
+  return (
+    <div style={{padding:"6px 12px",borderBottom:"1px solid #EEF2F7",flexShrink:0}}>
+      <div style={{fontSize:9,color:"#6381A7",textTransform:"uppercase",letterSpacing:1,marginBottom:4,fontFamily:"var(--mono)"}}>Timeline</div>
+      <div style={{display:"flex",height:10,borderRadius:4,overflow:"hidden",gap:1}}>
+        {segs.map((s,i)=>(
+          <div key={i} title={`${STATES[s.state]?.label||s.state} (${s.count} pts)`}
+            style={{flex:s.count/total,background:s.color,cursor:"pointer",minWidth:2,transition:"opacity .15s"}}
+            onClick={()=>onSegmentClick(s.state)}
+            onMouseEnter={e=>e.currentTarget.style.opacity=".7"}
+            onMouseLeave={e=>e.currentTarget.style.opacity="1"}/>
+        ))}
+      </div>
+      <div style={{display:"flex",gap:8,marginTop:4,flexWrap:"wrap"}}>
+        {Object.entries(STATES).map(([k,v])=>{
+          const cnt = points.filter(p=>p.state===k).length;
+          if (!cnt) return null;
+          return <span key={k} style={{fontSize:8,color:v.color,fontFamily:"var(--mono)"}}>{v.label}: {cnt}</span>;
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── LISTA DE PUNTOS ──────────────────────────────────────────────────────────
+// UX-06: badge ZC + separadores de entrada/salida
+// UX-07: fondo amarillo en SOG < 0.5
+// UX-09: fecha solo cuando cambia (agrupada)
+// UX-10: número de fila #
+// UX-19: gap de datos AIS
+// UX-20: columna de SOG coloreada
+function PointsList({ visible, points, selPt, setSelPt, setEditing }) {
+  let lastDate = null;
+
+  return (
+    <>
+      {visible.length===0&&(
+        <div style={{padding:"20px 12px",textAlign:"center",fontSize:11,color:"#A5B5CC"}}>
+          No hay puntos en este viaje.
+        </div>
+      )}
+      {visible.map((p, vi) => {
+        const realIdx = points.indexOf(p);
+        const isWS    = p.state==="WORKING_STOP";
+        const isZC    = p.zone==="ZONA_COMUN";
+        const isSlowStop = p.sog!=null&&p.sog<=0.5;
+        const col     = isWS?(p.servicio_num!=null?svcColor(p.servicio_num):"#9E9E9E"):(STATES[p.state]?.color||"#999");
+        const isSel   = selPt===realIdx;
+
+        // UX-09: agrupar por fecha
+        const thisDate = fmtDate(p.datetime);
+        const showDate = thisDate!==lastDate;
+        lastDate = thisDate;
+
+        // UX-06: detectar entrada/salida de ZC
+        const prevVisible = vi>0?visible[vi-1]:null;
+        const enteredZC = isZC && prevVisible && prevVisible.zone!=="ZONA_COMUN";
+        const exitedZC  = !isZC && prevVisible && prevVisible.zone==="ZONA_COMUN";
+
+        // UX-19: gap entre puntos consecutivos
+        let gapWarning = null;
+        if (realIdx>0) {
+          const prev = points[realIdx-1];
+          const gapHs = (p.datetime - prev.datetime) / 3600000;
+          if (gapHs > GAP_UMBRAL_HS) {
+            gapWarning = `Gap de ${gapHs.toFixed(1)}h en datos AIS`;
+          }
+        }
+
+        return (
+          <div key={vi}>
+            {/* UX-09: separador de fecha */}
+            {showDate&&(
+              <div style={{padding:"3px 10px",background:"#F8FAFC",fontSize:8,color:"#A5B5CC",fontFamily:"var(--mono)",borderBottom:"1px solid #EEF2F7",borderTop:vi>0?"1px solid #EEF2F7":"none"}}>
+                {thisDate}
+              </div>
+            )}
+
+            {/* UX-19: gap warning */}
+            {gapWarning&&(
+              <div style={{padding:"2px 10px",background:"#FFFBEB",fontSize:8,color:"#92400E",fontFamily:"var(--mono)",borderBottom:"1px solid #FCD34D"}}>
+                ⚠ {gapWarning}
+              </div>
+            )}
+
+            {/* UX-06: separador entrada ZC */}
+            {enteredZC&&(
+              <div style={{padding:"2px 10px",background:"#EFF6FF",fontSize:8,color:"#235C96",fontFamily:"var(--mono)",borderBottom:"1px solid #BFDBFE",borderTop:"1px solid #BFDBFE",fontWeight:600}}>
+                ↓ Entró a Zona Común
+              </div>
+            )}
+
+            <div role="button" tabIndex={0}
+              style={{
+                display:"grid",gridTemplateColumns:"22px 46px 38px 1fr 16px",
+                gap:4,padding:"5px 10px",
+                borderBottom:"1px solid #F5F7FA",cursor:"pointer",alignItems:"center",
+                // UX-07: fondo amarillo en paradas
+                background:isSel?(isWS?"#F0FFF4":"#EFF6FF"):isSlowStop?"#FFFDE7":"transparent",
+                borderLeft:isSel?`3px solid ${isWS?"#1E7A4A":"#235C96"}`:"3px solid transparent",
+              }}
+              onClick={()=>{setSelPt(realIdx);if(isWS)setEditing({idx:realIdx,pt:p});}}
+              onKeyDown={e=>{if(e.key==="Enter"||e.key===" "){setSelPt(realIdx);if(isWS)setEditing({idx:realIdx,pt:p});}}}
+            >
+              {/* UX-10: número de fila */}
+              <span style={{fontFamily:"var(--mono)",fontSize:8,color:"#C4CADC",textAlign:"center"}}>{realIdx+1}</span>
+
+              {/* UX-09: solo hora (fecha ya está en el separador) */}
+              <span style={{fontFamily:"var(--mono)",fontSize:10,color:"#6381A7",lineHeight:1.2}}>
+                {fmtTime(p.datetime)}
+              </span>
+
+              {/* SOG coloreado — UX-07: ancla si SOG=0 */}
+              <span style={{fontFamily:"var(--mono)",fontSize:10,textAlign:"right",color:p.sog===null?"#A5B5CC":p.sog>3?"#235C96":p.sog<=0.5?"#1E7A4A":"#854F0B"}}>
+                {p.sog===null?"—":p.sog===0?"⚓":p.sog!=null?`${Number(p.sog).toFixed(1)}`:"—"}
+                {p.sog!==null&&p.sog!==0&&<span style={{fontSize:7}}>kn</span>}
+              </span>
+
+              {/* Etiqueta estado/servicio + UX-06: badge ZC */}
+              <span style={{display:"flex",alignItems:"center",gap:3,overflow:"hidden"}}>
+                <span style={{fontSize:8,padding:"2px 4px",borderRadius:3,background:`${col}18`,color:col,border:`1px solid ${col}44`,fontFamily:"var(--mono)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>
+                  {p.servicio_num!=null
+                    ?`S${p.servicio_num}${p.tipo_servicio&&!["SIN_CLASIFICAR","BORRADO"].includes(p.tipo_servicio)?` · ${SERVICE_TYPES[p.tipo_servicio]?.label||""}`:""}`
+                    :(STATES[p.state]?.label||p.state)}
+                </span>
+                {/* UX-06: badge ZC */}
+                {isZC&&<span style={{fontSize:7,padding:"1px 3px",borderRadius:2,background:"#DBEAFE",color:"#1E40AF",fontFamily:"var(--mono)",flexShrink:0}}>ZC</span>}
+              </span>
+
+              <span style={{fontSize:11,color:isSel?"#235C96":"#D6E0ED",textAlign:"center"}}>{isWS?"✏":""}</span>
+            </div>
+
+            {/* UX-06: separador salida ZC */}
+            {exitedZC&&(
+              <div style={{padding:"2px 10px",background:"#F8FAFC",fontSize:8,color:"#6381A7",fontFamily:"var(--mono)",borderBottom:"1px solid #EEF2F7"}}>
+                ↑ Salió de Zona Común
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </>
   );
 }
