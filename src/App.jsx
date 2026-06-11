@@ -415,18 +415,31 @@ export default function App() {
 
 // ─── TRIPS LIST ───────────────────────────────────────────────────────────────
 // UX-14: filtro Todos / Pendientes / Validados
+// MEJORA-02: checkbox Solo ZC
 function TripsList({ trips, onSelectTrip }) {
   const [listFilter, setListFilter] = useState("PENDING"); // UX-14: default pendientes
+  const [onlyZC,     setOnlyZC]     = useState(false);     // MEJORA-02
 
   const validated  = trips.filter(t=>t.validated).length;
   const pending    = trips.filter(t=>!t.validated).length;
   const incomplete = trips.filter(t=>t.incomplete).length;
+  // MEJORA-02: contar cuántos viajes tienen al menos 1 punto en ZONA_COMUN
+  const withZC     = trips.filter(t=>t.zones?.includes("ZONA_COMUN")).length;
 
   const filtered = trips.filter(t => {
-    if (listFilter==="PENDING")   return !t.validated;
-    if (listFilter==="VALIDATED") return t.validated;
+    if (listFilter==="PENDING")   { if (t.validated) return false; }
+    if (listFilter==="VALIDATED") { if (!t.validated) return false; }
+    if (onlyZC && !t.zones?.includes("ZONA_COMUN")) return false; // MEJORA-02
     return true;
   });
+
+  // Mensaje de lista vacía contextualizado
+  const emptyMsg = onlyZC
+    ? (listFilter==="PENDING"   ? "No hay viajes pendientes con Zona Común."
+      :listFilter==="VALIDATED" ? "No hay viajes validados con Zona Común."
+      :                           "No hay viajes con Zona Común.")
+    : (listFilter==="PENDING"   ? "No hay viajes pendientes."
+      :                           "No hay viajes validados.");
 
   return (
     <div style={{padding:"28px 32px",maxWidth:1040}}>
@@ -442,15 +455,31 @@ function TripsList({ trips, onSelectTrip }) {
           <span>⏳ {pending} pendientes</span>
           {incomplete>0&&<span style={{color:"#92400E"}}>⚠ {incomplete} incompleto{incomplete>1?"s":""}</span>}
         </div>
-        {/* UX-14: toggle de filtro */}
-        <div style={{marginLeft:"auto",display:"flex",gap:3}}>
-          {[["ALL","Todos"],["PENDING","Pendientes"],["VALIDATED","Validados"]].map(([f,l])=>(
-            <button key={f}
-              style={{fontSize:10,padding:"4px 10px",borderRadius:6,cursor:"pointer",fontFamily:"var(--mono)",
-                border:`1px solid ${listFilter===f?"#235C96":"#D6E0ED"}`,
-                background:listFilter===f?"#EFF6FF":"#fff",color:listFilter===f?"#235C96":"#6381A7",fontWeight:listFilter===f?600:400}}
-              onClick={()=>setListFilter(f)}>{l}</button>
-          ))}
+        <div style={{marginLeft:"auto",display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+          {/* UX-14: toggle estado */}
+          <div style={{display:"flex",gap:3}}>
+            {[["ALL","Todos"],["PENDING","Pendientes"],["VALIDATED","Validados"]].map(([f,l])=>(
+              <button key={f}
+                style={{fontSize:10,padding:"4px 10px",borderRadius:6,cursor:"pointer",fontFamily:"var(--mono)",
+                  border:`1px solid ${listFilter===f?"#235C96":"#D6E0ED"}`,
+                  background:listFilter===f?"#EFF6FF":"#fff",color:listFilter===f?"#235C96":"#6381A7",fontWeight:listFilter===f?600:400}}
+                onClick={()=>setListFilter(f)}>{l}</button>
+            ))}
+          </div>
+          {/* MEJORA-02: toggle Solo ZC */}
+          <button
+            style={{
+              fontSize:10,padding:"4px 10px",borderRadius:6,cursor:"pointer",fontFamily:"var(--mono)",
+              border:`1px solid ${onlyZC?"#1E40AF":"#D6E0ED"}`,
+              background:onlyZC?"#DBEAFE":"#fff",
+              color:onlyZC?"#1E40AF":"#6381A7",
+              fontWeight:onlyZC?600:400,
+            }}
+            onClick={()=>setOnlyZC(v=>!v)}
+            title={`${withZC} viajes tienen puntos en Zona Común`}
+          >
+            {onlyZC?"✓ ":""}ZC ({withZC})
+          </button>
         </div>
       </div>
 
@@ -460,7 +489,7 @@ function TripsList({ trips, onSelectTrip }) {
 
       {filtered.length===0&&(
         <div style={{padding:"32px",textAlign:"center",fontSize:12,color:"var(--muted)"}}>
-          No hay viajes {listFilter==="PENDING"?"pendientes":"validados"}.
+          {emptyMsg}
         </div>
       )}
 
