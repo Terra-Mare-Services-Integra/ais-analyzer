@@ -160,12 +160,12 @@ function ServiceEditor({ point, onSave, onClose, maxSvcNum }) {
 // automáticamente basándose en la zona dominante de los puntos.
 
 // Regla de sugerencia de tipo según zona dominante del cluster
+// MEJORA-10: regla única validada operativamente.
+// Solo ZONA_COMUN sugiere AGUA. Para cualquier otra zona retorna null
+// para que el operador elija sin pre-selección.
 function suggestTypeForZone(zonaDominante) {
-  if (zonaDominante === "ZONA_COMUN")  return "AGUA";
-  if (zonaDominante === "ZONA_ALFA")   return "ALIJO_ZC";
-  if (zonaDominante === "ZONA_DELTA")  return "ALIJO_ZC";
-  if (zonaDominante === "RECALADA")    return "AGUA";
-  return "AGUA";
+  if (zonaDominante === "ZONA_COMUN") return "AGUA";
+  return null;
 }
 
 // Zona más frecuente entre los puntos del cluster
@@ -186,9 +186,11 @@ function ClusterEditor({ cluster, points, onSave, onClose, maxSvcNum }) {
   const sugTipo     = hasPrior ? null : suggestTypeForZone(sugZona);
   const isSuggested = !hasPrior; // true = valores vienen de sugerencia automática
 
+  // MEJORA-10: si no hay sugerencia (sugTipo===null) no pre-seleccionar tipo —
+  // dejar null para que el operador elija sin influencia automática.
   const [svc,    setSvc]    = useState(
     firstClassified?.tipo_servicio && !["SIN_CLASIFICAR","BORRADO"].includes(firstClassified.tipo_servicio)
-      ? firstClassified.tipo_servicio : (sugTipo ?? "AGUA")
+      ? firstClassified.tipo_servicio : sugTipo
   );
   const [zona,   setZona]   = useState(
     firstClassified?.zona_servicio && ZONAS_OP.includes(firstClassified.zona_servicio)
@@ -278,8 +280,9 @@ function ClusterEditor({ cluster, points, onSave, onClose, maxSvcNum }) {
 
         <div style={{display:"flex",gap:7}}>
           <button style={{flex:1,padding:"9px 0",borderRadius:7,background:"#235C96",color:"#fff",border:"none",fontSize:12,fontWeight:600,cursor:"pointer"}}
+            disabled={svcNum!==null && svc===null}
             onClick={()=>onSave({ svcNum, svc, zona, clusterPoints: cluster.points, startIdx: cluster.startIdx, endIdx: cluster.endIdx })}>
-            ✓ Aplicar a {cluster.points.length} puntos
+            {svcNum!==null && svc===null ? "Elegí un tipo de servicio" : "✓ Aplicar a " + cluster.points.length + " puntos"}
           </button>
           <button style={{padding:"9px 12px",borderRadius:7,border:"1px solid #D6E0ED",background:"#fff",color:"#6381A7",fontSize:11,cursor:"pointer"}}
             onClick={onClose}>Cancelar</button>
