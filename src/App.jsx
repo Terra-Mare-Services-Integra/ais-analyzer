@@ -303,13 +303,10 @@ export function exportCSV(trips, filename = "servicios_ais.csv") {
 
   const escape = v => {
     const s = String(v ?? "");
-    return s.includes(",") || s.includes('"') || s.includes("
-")
-      ? `"${s.replace(/"/g,'""')}"` : s;
+    return s.includes(",") || s.includes('"') || s.includes("\n") ? `"${s.replace(/"/g,'""`)}"` : s;
   };
 
-  const csv = [headers, ...rows].map(r => r.map(escape).join(",")).join("
-");
+  const csv = [headers, ...rows].map(r => r.map(escape).join(",")).join("\r\n");
 
   const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" }); // BOM para Excel
   const url  = URL.createObjectURL(blob);
