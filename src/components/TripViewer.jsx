@@ -486,7 +486,7 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
     : null;
 
   return (
-    <div style={{display:"flex",flexDirection:"column",height:"calc(100vh - 52px)"}}>>
+    <div style={{display:"flex",flexDirection:"column",height:"calc(100vh - 52px)"}}>
 
       {/* ── TOPBAR ── */}
       <div style={{display:"flex",alignItems:"center",gap:8,padding:"9px 16px",borderBottom:"1px solid #D6E0ED",background:"#fff",flexShrink:0,flexWrap:"wrap"}}>
