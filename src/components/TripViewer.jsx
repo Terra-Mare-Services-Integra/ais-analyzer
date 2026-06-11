@@ -289,12 +289,74 @@ function ClusterEditor({ cluster, points, onSave, onClose, maxSvcNum }) {
   );
 }
 
+// ─── MEJORA-07: RENUMBER MODAL ───────────────────────────────────────────────
+// Permite cambiar todos los puntos de S(fromNum) a S(toNum) en un viaje.
+// Solo aparece cuando el viaje tiene 2+ números de servicio distintos.
+function RenumberModal({ svcNums, onRenumber, onClose }) {
+  const [fromNum, setFromNum] = useState(svcNums[0]);
+  const [toNum,   setToNum]   = useState(svcNums.length > 1 ? svcNums[1] : svcNums[0]);
+
+  useEffect(() => {
+    const h = e => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [onClose]);
+
+  return (
+    <div role="dialog" aria-modal="true"
+      style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",zIndex:9999,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}
+      onClick={onClose}>
+      <div style={{background:"#fff",borderRadius:14,padding:22,width:"100%",maxWidth:340,boxShadow:"0 20px 60px rgba(0,0,0,.25)"}}
+        onClick={e=>e.stopPropagation()}>
+        <div style={{fontSize:14,fontWeight:700,color:"#213363",marginBottom:4}}>Renumerar servicios</div>
+        <div style={{fontSize:11,color:"#6381A7",marginBottom:16,lineHeight:1.6}}>
+          Cambia el número de todos los puntos de un servicio. Útil para corregir errores de clasificación.
+        </div>
+
+        <div style={{fontSize:10,fontWeight:600,color:"#6381A7",textTransform:"uppercase",letterSpacing:".8px",marginBottom:8}}>De</div>
+        <div style={{display:"flex",gap:6,marginBottom:14,flexWrap:"wrap"}}>
+          {svcNums.map(n=>(
+            <button key={n} style={{padding:"7px 14px",borderRadius:6,fontSize:11,cursor:"pointer",fontWeight:fromNum===n?700:400,border:`1px solid ${fromNum===n?svcColor(n):"#D6E0ED"}`,background:fromNum===n?`${svcColor(n)}18`:"#fff",color:fromNum===n?svcColor(n):"#213363"}}
+              onClick={()=>setFromNum(n)}>S{n}</button>
+          ))}
+        </div>
+
+        <div style={{fontSize:10,fontWeight:600,color:"#6381A7",textTransform:"uppercase",letterSpacing:".8px",marginBottom:8}}>A</div>
+        <div style={{display:"flex",gap:6,marginBottom:20,flexWrap:"wrap"}}>
+          {svcNums.map(n=>(
+            <button key={n} style={{padding:"7px 14px",borderRadius:6,fontSize:11,cursor:"pointer",fontWeight:toNum===n?700:400,border:`1px solid ${toNum===n?svcColor(n):"#D6E0ED"}`,background:toNum===n?`${svcColor(n)}18`:"#fff",color:toNum===n?svcColor(n):"#213363",opacity:n===fromNum?.5:1}}
+              onClick={()=>setToNum(n)}>S{n}</button>
+          ))}
+        </div>
+
+        {fromNum===toNum&&(
+          <div style={{fontSize:10,color:"#EF5350",fontFamily:"var(--mono)",marginBottom:12,padding:"4px 8px",background:"#FFF5F5",borderRadius:5}}>
+            Elegí números distintos para hacer el cambio.
+          </div>
+        )}
+
+        <div style={{display:"flex",gap:7}}>
+          <button
+            style={{flex:1,padding:"9px 0",borderRadius:7,background:fromNum===toNum?"#D6E0ED":"#235C96",color:"#fff",border:"none",fontSize:12,fontWeight:600,cursor:fromNum===toNum?"not-allowed":"pointer"}}
+            disabled={fromNum===toNum}
+            onClick={()=>onRenumber(fromNum, toNum)}>
+            S{fromNum} → S{toNum} en todo el viaje
+          </button>
+          <button style={{padding:"9px 12px",borderRadius:7,border:"1px solid #D6E0ED",background:"#fff",color:"#6381A7",fontSize:11,cursor:"pointer"}}
+            onClick={onClose}>Cancelar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── COMPONENTE PRINCIPAL ─────────────────────────────────────────────────────
 export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
   const [tripIdx,        setTripIdx]        = useState(initialIdx);
   const [selPt,          setSelPt]          = useState(null);
   const [editing,        setEditing]        = useState(null);
   const [editingCluster, setEditingCluster] = useState(null); // MEJORA-01
+  const [renum,          setRenum]          = useState(false);    // MEJORA-07
   const [filter,         setFilter]         = useState("ALL");
   const [saving,         setSaving]         = useState(false);
   const [saveStatus,     setSaveStatus]     = useState(null);
@@ -308,6 +370,7 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
     setSelPt(null);
     setEditing(null);
     setEditingCluster(null);
+    setRenum(false);
     setFilter("ALL");
   }, []);
 
@@ -327,7 +390,7 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
 
   useEffect(() => {
     const h = e => {
-      if (editing || editingCluster) return;
+      if (editing || editingCluster || renum) return;
       if (e.target.tagName==="INPUT"||e.target.tagName==="TEXTAREA") return;
       if (e.key==="n"||e.key==="N") goNextPending();
       if (e.key==="p"||e.key==="P") goPrevPending();
@@ -480,6 +543,60 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
       setSaveStatus("ok");
     } catch(e) {
       console.error("[TripViewer] Error guardando cluster en Supabase:", e);
+      setSaveStatus("error");
+    } finally {
+      setSaving(false);
+      setTimeout(() => setSaveStatus(null), 2500);
+    }
+  }, [trips, tripIdx, setTrips]);
+
+  // ─── MEJORA-07: handleRenumber ──────────────────────────────────────────────
+  // Cambia todos los puntos con servicio_num === fromNum a toNum en el viaje.
+  // Actualiza local y Supabase con una sola query .in("datetime", [...]).
+  const handleRenumber = useCallback(async (fromNum, toNum) => {
+    if (fromNum === toNum) { setRenum(false); return; }
+
+    // Fase 1: actualización local
+    const newTrips = trips.map((t, ti) => {
+      if (ti !== tripIdx) return t;
+      const newPoints = t.points.map(p =>
+        p.servicio_num === fromNum ? { ...p, servicio_num: toNum } : p
+      );
+      const servicios = new Set(newPoints.filter(p => p.servicio_num != null && p.tipo_servicio !== "BORRADO").map(p => p.servicio_num));
+      return { ...t, points: newPoints, nServices: servicios.size };
+    });
+    setTrips(newTrips);
+    setRenum(false);
+
+    // Fase 2: persistencia remota
+    const ct = newTrips[tripIdx];
+    if (!ct?.supabaseId) return;
+
+    setSaving(true);
+    setSaveStatus(null);
+    try {
+      const affectedDts = trips[tripIdx].points
+        .filter(p => p.servicio_num === fromNum)
+        .map(p => p.datetime instanceof Date ? p.datetime.toISOString() : new Date(p.datetime).toISOString());
+
+      if (affectedDts.length > 0) {
+        const { error: errPt } = await supabase
+          .from("ais_points")
+          .update({ servicio_num: toNum })
+          .eq("trip_id", ct.supabaseId)
+          .in("datetime", affectedDts);
+        if (errPt) throw errPt;
+      }
+
+      const { error: errTrip } = await supabase
+        .from("ais_trips")
+        .update({ n_services: newTrips[tripIdx].nServices })
+        .eq("id", ct.supabaseId);
+      if (errTrip) throw errTrip;
+
+      setSaveStatus("ok");
+    } catch(e) {
+      console.error("[TripViewer] Error renumerando en Supabase:", e);
       setSaveStatus("error");
     } finally {
       setSaving(false);
@@ -673,6 +790,18 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
             ))}
           </div>
 
+          {/* MEJORA-07: botón renumerar — solo si hay 2+ servicios numerados */}
+          {maxSvcNum>=2&&(
+            <div style={{padding:"4px 12px",borderBottom:"1px solid #EEF2F7",flexShrink:0,display:"flex",justifyContent:"flex-end"}}>
+              <button
+                style={{fontSize:9,padding:"3px 9px",borderRadius:5,border:"1px solid #D6E0ED",background:"#fff",color:"#6381A7",cursor:"pointer",fontFamily:"var(--mono)"}}
+                onClick={()=>setRenum(true)}
+                title="Cambiar el número de todos los puntos de un servicio">
+                ⇄ Renumerar servicios
+              </button>
+            </div>
+          )}
+
           {/* UX-18: mini timeline */}
           <TripTimeline points={points} onSegmentClick={state=>{
             if (state==="WORKING_STOP") setFilter("SVC");
@@ -753,6 +882,15 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
       {editing&&(
         <ServiceEditor point={editing.pt} onSave={handleSave}
           onClose={()=>{setEditing(null);setSelPt(null);}} maxSvcNum={maxSvcNum}/>
+      )}
+
+      {/* MEJORA-07: Modal renumerar */}
+      {renum&&maxSvcNum>=2&&(
+        <RenumberModal
+          svcNums={Array.from({length:maxSvcNum},(_,i)=>i+1)}
+          onRenumber={handleRenumber}
+          onClose={()=>setRenum(false)}
+        />
       )}
 
       {/* MEJORA-01: Modal cluster completo */}
