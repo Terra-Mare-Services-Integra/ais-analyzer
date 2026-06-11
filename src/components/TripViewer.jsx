@@ -5,13 +5,9 @@ import { ZONES, STATES, SERVICE_TYPES } from "../lib/ais_engine";
 import { supabase } from "../lib/supabase";
 
 // ─── TIMEZONE ────────────────────────────────────────────────────────────────
-// Offset del operador. Hardcodeado UTC-3 (Argentina / ART).
-// En el futuro puede venir de configuración de usuario.
 const TZ_OFFSET_HS = -3;
 const TZ_LABEL     = "ART";
 
-// Convierte un Date UTC al equivalente local del operador (sin cambiar el objeto).
-// Devuelve un Date que, leído con getUTC*, da la hora local correcta.
 function toLocal(d) {
   if (!d) return null;
   const dt = d instanceof Date ? d : new Date(d);
@@ -20,24 +16,18 @@ function toLocal(d) {
 }
 
 // ─── HELPERS DE FECHA ────────────────────────────────────────────────────────
-// Todos los helpers leen con getUTC* sobre el objeto ya desplazado por toLocal().
-// Así la lógica de offset está en UN solo lugar.
-
-// Fecha local: "14/11/24"
 const fmtDate = d => {
   const loc = toLocal(d);
   if (!loc) return "—";
   return `${String(loc.getUTCDate()).padStart(2,"0")}/${String(loc.getUTCMonth()+1).padStart(2,"0")}/${String(loc.getUTCFullYear()).slice(-2)}`;
 };
 
-// Hora local: "23:04"
 const fmtTime = d => {
   const loc = toLocal(d);
   if (!loc) return "—";
   return `${String(loc.getUTCHours()).padStart(2,"0")}:${String(loc.getUTCMinutes()).padStart(2,"0")}`;
 };
 
-// Hora UTC pura: "02:04"
 const fmtTimeUTC = d => {
   if (!d) return "—";
   const dt = d instanceof Date ? d : new Date(d);
@@ -45,19 +35,16 @@ const fmtTimeUTC = d => {
   return `${String(dt.getUTCHours()).padStart(2,"0")}:${String(dt.getUTCMinutes()).padStart(2,"0")}`;
 };
 
-// Datetime completo para tooltips del mapa: "14/11/24 23:04 ART · 02:04 UTC"
 const fmtDatetime = d => {
   if (!d) return "—";
   return `${fmtDate(d)} ${fmtTime(d)} ${TZ_LABEL} · ${fmtTimeUTC(d)} UTC`;
 };
 
-// Rango de fechas para el header del viaje: "14/11/24 23:04 ART → 15/11/24 10:04 ART"
 const fmtRange = (start, end) => {
   if (!start || !end) return "—";
   return `${fmtDate(start)} ${fmtTime(start)} ${TZ_LABEL} → ${fmtDate(end)} ${fmtTime(end)} ${TZ_LABEL}`;
 };
 
-// UX-15: duración legible "4d 15h" en vez de solo "h"
 function fmtDuration(hs) {
   if (hs == null || isNaN(hs)) return "—";
   const days = Math.floor(hs / 24);
@@ -70,7 +57,7 @@ function fmtDuration(hs) {
 const SVC_COLORS = ["#2196F3","#FF9800","#9C27B0","#4CAF50","#F44336","#00BCD4","#FF5722"];
 const svcColor = n => n != null ? SVC_COLORS[(n-1) % SVC_COLORS.length] : "#9E9E9E";
 
-// ─── MAP FIT (solo al montar, nunca en clasificaciones) ───────────────────────
+// ─── MAP FIT ─────────────────────────────────────────────────────────────────
 function MapFit({ points }) {
   const map    = useMap();
   const fitted = useRef(false);
@@ -90,9 +77,9 @@ function MapFit({ points }) {
 // ─── CONSTANTES ───────────────────────────────────────────────────────────────
 const SVCS_CLASIFICABLES = ["AGUA","SLOP","LUBRICANTES","ALIJO_ZC","ALIJO_ZA","ALIJO_ZD"];
 const ZONAS_OP = ["ZONA_COMUN","ZONA_ALFA","ZONA_DELTA","RECALADA","KM171"];
-const GAP_UMBRAL_HS = 2; // UX-19: gap en datos AIS
+const GAP_UMBRAL_HS = 2;
 
-// ─── SERVICE EDITOR MODAL ────────────────────────────────────────────────────
+// ─── SERVICE EDITOR MODAL (punto individual) ──────────────────────────────────
 function ServiceEditor({ point, onSave, onClose, maxSvcNum }) {
   const [svc,    setSvc]    = useState(
     point.tipo_servicio && !["SIN_CLASIFICAR","BORRADO"].includes(point.tipo_servicio)
@@ -167,29 +154,120 @@ function ServiceEditor({ point, onSave, onClose, maxSvcNum }) {
   );
 }
 
+// ─── MEJORA-01: CLUSTER EDITOR MODAL ─────────────────────────────────────────
+// Clasifica TODOS los puntos del cluster de una sola acción.
+// Muestra cuántos puntos y la duración para dar contexto al operador.
+function ClusterEditor({ cluster, points, onSave, onClose, maxSvcNum }) {
+  const firstClassified = cluster.points.find(p => p.servicio_num != null);
+  const [svc,    setSvc]    = useState(
+    firstClassified?.tipo_servicio && !["SIN_CLASIFICAR","BORRADO"].includes(firstClassified.tipo_servicio)
+      ? firstClassified.tipo_servicio : "AGUA"
+  );
+  const [zona,   setZona]   = useState(
+    firstClassified?.zona_servicio && ZONAS_OP.includes(firstClassified.zona_servicio)
+      ? firstClassified.zona_servicio : "ZONA_COMUN"
+  );
+  const [svcNum, setSvcNum] = useState(firstClassified?.servicio_num ?? null);
+
+  const svcNums = Array.from({ length: (maxSvcNum||0)+1 }, (_,i) => i+1);
+
+  useEffect(() => {
+    const h = e => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [onClose]);
+
+  const durMs = cluster.points[cluster.points.length-1].datetime - cluster.points[0].datetime;
+  const durH  = (durMs / 3600000).toFixed(1);
+  const sogMin = Math.min(...cluster.points.filter(p=>p.sog!=null).map(p=>p.sog));
+  const sogMax = Math.max(...cluster.points.filter(p=>p.sog!=null).map(p=>p.sog));
+
+  return (
+    <div role="dialog" aria-modal="true"
+      style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",zIndex:9999,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}
+      onClick={onClose}>
+      <div style={{background:"#fff",borderRadius:14,padding:22,width:"100%",maxWidth:380,boxShadow:"0 20px 60px rgba(0,0,0,.25)"}}
+        onClick={e=>e.stopPropagation()}>
+
+        <div style={{fontSize:14,fontWeight:700,color:"#213363",marginBottom:4}}>Clasificar cluster</div>
+        <div style={{background:"#EFF6FF",borderRadius:8,padding:"8px 12px",marginBottom:16,display:"flex",gap:16,flexWrap:"wrap"}}>
+          <span style={{fontSize:10,color:"#235C96",fontFamily:"var(--mono)"}}>
+            <strong>{cluster.points.length}</strong> puntos
+          </span>
+          <span style={{fontSize:10,color:"#235C96",fontFamily:"var(--mono)"}}>
+            <strong>{durH}h</strong> duración
+          </span>
+          <span style={{fontSize:10,color:"#235C96",fontFamily:"var(--mono)"}}>
+            SOG {sogMin.toFixed(1)}–{sogMax.toFixed(1)} kn
+          </span>
+          <span style={{fontSize:10,color:"#235C96",fontFamily:"var(--mono)"}}>
+            {fmtTime(cluster.points[0].datetime)} → {fmtTime(cluster.points[cluster.points.length-1].datetime)} {TZ_LABEL}
+          </span>
+        </div>
+
+        <div style={{fontSize:10,fontWeight:600,color:"#6381A7",textTransform:"uppercase",letterSpacing:".8px",marginBottom:8}}>Número de servicio</div>
+        <div style={{display:"flex",gap:6,marginBottom:14,flexWrap:"wrap"}}>
+          <button style={{padding:"7px 12px",borderRadius:6,fontSize:11,cursor:"pointer",fontWeight:svcNum===null?700:400,border:`1px solid ${svcNum===null?"#EF5350":"#D6E0ED"}`,background:svcNum===null?"#FFF5F5":"#fff",color:svcNum===null?"#C0392B":"#6381A7"}}
+            onClick={()=>setSvcNum(null)}>✕ No es servicio</button>
+          {svcNums.map(n=>(
+            <button key={n} style={{padding:"7px 14px",borderRadius:6,fontSize:11,cursor:"pointer",fontWeight:svcNum===n?700:400,border:`1px solid ${svcNum===n?svcColor(n):"#D6E0ED"}`,background:svcNum===n?`${svcColor(n)}18`:"#fff",color:svcNum===n?svcColor(n):"#213363"}}
+              onClick={()=>{setSvcNum(n);if(!svc||["BORRADO","SIN_CLASIFICAR"].includes(svc))setSvc("AGUA");}}>
+              S{n}{n===(maxSvcNum||0)+1?" (nuevo)":""}
+            </button>
+          ))}
+        </div>
+
+        {svcNum!==null&&<>
+          <div style={{fontSize:10,fontWeight:600,color:"#6381A7",textTransform:"uppercase",letterSpacing:".8px",marginBottom:8}}>Tipo de servicio</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5,marginBottom:14}}>
+            {SVCS_CLASIFICABLES.map(s=>{
+              const info=SERVICE_TYPES[s], sel=svc===s;
+              return <button key={s} style={{padding:"8px 6px",borderRadius:6,fontSize:10,cursor:"pointer",textAlign:"center",border:`1.5px solid ${sel?info.color:"#D6E0ED"}`,background:sel?`${info.color}18`:"#fff",color:sel?info.color:"#213363",fontWeight:sel?700:400,transition:"all .12s"}}
+                onClick={()=>setSvc(s)}>{info.label}</button>;
+            })}
+          </div>
+          <div style={{fontSize:10,fontWeight:600,color:"#6381A7",textTransform:"uppercase",letterSpacing:".8px",marginBottom:8}}>Zona operativa</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5,marginBottom:16}}>
+            {ZONAS_OP.map(z=>{const sel=zona===z;return<button key={z} style={{padding:"7px 8px",borderRadius:6,fontSize:10,cursor:"pointer",textAlign:"center",border:`1.5px solid ${sel?"#235C96":"#D6E0ED"}`,background:sel?"#EFF6FF":"#fff",color:sel?"#235C96":"#213363",fontWeight:sel?600:400,transition:"all .12s"}}
+              onClick={()=>setZona(z)}>{z.replace(/_/g," ")}</button>;})}
+          </div>
+        </>}
+
+        <div style={{display:"flex",gap:7}}>
+          <button style={{flex:1,padding:"9px 0",borderRadius:7,background:"#235C96",color:"#fff",border:"none",fontSize:12,fontWeight:600,cursor:"pointer"}}
+            onClick={()=>onSave({ svcNum, svc, zona, clusterPoints: cluster.points, startIdx: cluster.startIdx, endIdx: cluster.endIdx })}>
+            ✓ Aplicar a {cluster.points.length} puntos
+          </button>
+          <button style={{padding:"9px 12px",borderRadius:7,border:"1px solid #D6E0ED",background:"#fff",color:"#6381A7",fontSize:11,cursor:"pointer"}}
+            onClick={onClose}>Cancelar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── COMPONENTE PRINCIPAL ─────────────────────────────────────────────────────
 export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
-  const [tripIdx,    setTripIdx]    = useState(initialIdx);
-  const [selPt,      setSelPt]      = useState(null);
-  const [editing,    setEditing]    = useState(null);
-  const [filter,     setFilter]     = useState("ALL");
-  const [saving,     setSaving]     = useState(false);
-  const [saveStatus, setSaveStatus] = useState(null);
-  // UX-14: filtro de lista
-  const [listFilter, setListFilter] = useState("PENDING");
+  const [tripIdx,        setTripIdx]        = useState(initialIdx);
+  const [selPt,          setSelPt]          = useState(null);
+  const [editing,        setEditing]        = useState(null);
+  const [editingCluster, setEditingCluster] = useState(null); // MEJORA-01
+  const [filter,         setFilter]         = useState("ALL");
+  const [saving,         setSaving]         = useState(false);
+  const [saveStatus,     setSaveStatus]     = useState(null);
+  const [listFilter,     setListFilter]     = useState("PENDING");
 
   const trip   = trips[tripIdx];
   const points = trip?.points || [];
 
-  // UX-03: resetear filtro al cambiar de viaje
   const goTrip = useCallback(newIdx => {
     setTripIdx(newIdx);
     setSelPt(null);
     setEditing(null);
-    setFilter("ALL"); // UX-03: siempre "Todo" al entrar a un viaje nuevo
+    setEditingCluster(null);
+    setFilter("ALL");
   }, []);
 
-  // UX-05: próximo pendiente
   const goNextPending = useCallback(() => {
     const idx = trips.findIndex((t,i) => i > tripIdx && !t.validated);
     if (idx !== -1) goTrip(idx);
@@ -204,10 +282,9 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
   const hasPrevPending = trips.slice(0,tripIdx).some(t=>!t.validated);
   const hasNextPending = trips.slice(tripIdx+1).some(t=>!t.validated);
 
-  // UX-05: atajos de teclado N / P / V / Escape
   useEffect(() => {
     const h = e => {
-      if (editing) return; // modal abierto — no interferir
+      if (editing || editingCluster) return;
       if (e.target.tagName==="INPUT"||e.target.tagName==="TEXTAREA") return;
       if (e.key==="n"||e.key==="N") goNextPending();
       if (e.key==="p"||e.key==="P") goPrevPending();
@@ -217,16 +294,14 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editing, tripIdx, trips]);
+  }, [editing, editingCluster, tripIdx, trips]);
 
-  // Puntos visibles según filtro
   const visible = useMemo(() => {
     if (filter==="SVC") return points.filter(p=>p.state==="WORKING_STOP");
     if (filter==="MOV") return points.filter(p=>p.state!=="IN_PORT");
     return points;
   }, [points, filter]);
 
-  // Segmentos de ruta
   const segments = useMemo(() => {
     const segs=[];
     for (let i=0;i<points.length-1;i++) {
@@ -235,12 +310,10 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
     return segs;
   }, [points]);
 
-  // UX-11: contador de clasificación en ZC
-  const zcPoints      = useMemo(()=>points.filter(p=>p.zone==="ZONA_COMUN"&&p.state==="WORKING_STOP"),[points]);
-  const zcClasificados= useMemo(()=>zcPoints.filter(p=>p.servicio_num!=null),[zcPoints]);
-  const zcFaltantes   = zcPoints.length - zcClasificados.length;
+  const zcPoints       = useMemo(()=>points.filter(p=>p.zone==="ZONA_COMUN"&&p.state==="WORKING_STOP"),[points]);
+  const zcClasificados = useMemo(()=>zcPoints.filter(p=>p.servicio_num!=null),[zcPoints]);
+  const zcFaltantes    = zcPoints.length - zcClasificados.length;
 
-  // UX-08: clusters de puntos consecutivos en ZC con SOG < 1 kn
   const clusters = useMemo(() => {
     const result=[];
     let current=null;
@@ -260,13 +333,8 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
 
   const maxSvcNum = Math.max(0,...points.map(p=>p.servicio_num||0));
 
-  // ─── BUG-01 FIX: handleSave ───────────────────────────────────────────────
-  // Separado en dos fases:
-  // Fase 1 — actualización local (siempre exitosa, síncrona).
-  // Fase 2 — persistencia en Supabase (solo si hay supabaseId; errores reales
-  //           de red/RLS activan el mensaje de error, no un if vacío).
+  // ─── BUG-01 FIX: handleSave (punto individual) ───────────────────────────
   const handleSave = useCallback(async updated => {
-    // Fase 1: actualización local — inmediata, nunca falla
     const newTrips = trips.map((t,ti)=>{
       if (ti!==tripIdx) return t;
       const newPoints = t.points.map((p,pi)=>pi===editing.idx?updated:p);
@@ -277,13 +345,8 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
     setEditing(null);
     setSelPt(null);
 
-    // Fase 2: persistencia remota — solo si el viaje tiene ID en Supabase
     const ct = newTrips[tripIdx];
-    if (!ct?.supabaseId) {
-      // Viaje solo en memoria (cargado desde Excel, no persistido aún).
-      // El guardado local ya ocurrió — no mostrar nada.
-      return;
-    }
+    if (!ct?.supabaseId) return;
 
     setSaving(true);
     setSaveStatus(null);
@@ -319,7 +382,68 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
     }
   }, [trips, tripIdx, editing, setTrips]);
 
-  // markValidated con advertencia si hay ZC sin clasificar
+  // ─── MEJORA-01: handleSaveCluster ────────────────────────────────────────
+  // Aplica la clasificación a TODOS los puntos del cluster de una vez.
+  // En Supabase: una sola query .in("datetime", [...]) en lugar de N queries.
+  const handleSaveCluster = useCallback(async ({ svcNum, svc, zona, clusterPoints }) => {
+    const tipoServicio = svcNum === null ? "BORRADO" : svc;
+
+    const clusterDatetimes = new Set(
+      clusterPoints.map(p =>
+        p.datetime instanceof Date ? p.datetime.toISOString() : new Date(p.datetime).toISOString()
+      )
+    );
+
+    const newTrips = trips.map((t,ti) => {
+      if (ti !== tripIdx) return t;
+      const newPoints = t.points.map(p => {
+        const dtStr = p.datetime instanceof Date ? p.datetime.toISOString() : new Date(p.datetime).toISOString();
+        if (!clusterDatetimes.has(dtStr)) return p;
+        return { ...p, tipo_servicio: tipoServicio, zona_servicio: zona, servicio_num: svcNum };
+      });
+      const servicios = new Set(newPoints.filter(p=>p.servicio_num!=null&&p.tipo_servicio!=="BORRADO").map(p=>p.servicio_num));
+      return { ...t, points: newPoints, nServices: servicios.size };
+    });
+
+    setTrips(newTrips);
+    setEditingCluster(null);
+    setSelPt(null);
+
+    const ct = newTrips[tripIdx];
+    if (!ct?.supabaseId) return;
+
+    setSaving(true);
+    setSaveStatus(null);
+    try {
+      const dtStrs = [...clusterDatetimes];
+
+      const { error: errPt } = await supabase
+        .from("ais_points")
+        .update({
+          tipo_servicio: tipoServicio,
+          zona_servicio: zona,
+          servicio_num:  svcNum,
+        })
+        .eq("trip_id", ct.supabaseId)
+        .in("datetime", dtStrs);
+      if (errPt) throw errPt;
+
+      const { error: errTrip } = await supabase
+        .from("ais_trips")
+        .update({ n_services: newTrips[tripIdx].nServices })
+        .eq("id", ct.supabaseId);
+      if (errTrip) throw errTrip;
+
+      setSaveStatus("ok");
+    } catch(e) {
+      console.error("[TripViewer] Error guardando cluster en Supabase:", e);
+      setSaveStatus("error");
+    } finally {
+      setSaving(false);
+      setTimeout(() => setSaveStatus(null), 2500);
+    }
+  }, [trips, tripIdx, setTrips]);
+
   const markValidated = useCallback(async () => {
     if (zcFaltantes > 0) {
       const ok = window.confirm(`Hay ${zcFaltantes} punto${zcFaltantes>1?"s":""} en Zona Común sin clasificar. ¿Validar igualmente?`);
@@ -344,7 +468,6 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
 
   if (!trip) return <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"calc(100vh - 52px)",color:"var(--muted)",fontSize:13}}>No hay viaje seleccionado.</div>;
 
-  // UX-15: duración legible
   const durLabel = fmtDuration(trip.durationHs);
 
   return (
@@ -355,19 +478,16 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
         <button style={S.btn(false)} onClick={onBack}>← Lista</button>
         <button style={S.btn(false)} onClick={()=>goTrip(Math.max(0,tripIdx-1))} disabled={tripIdx===0} aria-label="Anterior">‹</button>
 
-        {/* UX-01: título siempre sincronizado con tripIdx — fuente única de verdad */}
         <span style={{fontFamily:"var(--mono)",fontSize:11,fontWeight:700,color:"#213363"}}>
           Viaje #{trip.id}
           {" — "}
           {fmtRange(trip.dateStart, trip.dateEnd)}
-          {/* UX-15: duración explícita */}
           <span style={{marginLeft:6,fontSize:10,color:"#6381A7",fontWeight:400}}>({durLabel})</span>
           {trip.incomplete&&<span style={{marginLeft:8,fontSize:9,color:"#92400E",background:"#FEF3C7",padding:"1px 6px",borderRadius:3}}>⚠ Incompleto</span>}
         </span>
 
         <button style={S.btn(false)} onClick={()=>goTrip(Math.min(trips.length-1,tripIdx+1))} disabled={tripIdx===trips.length-1} aria-label="Siguiente">›</button>
 
-        {/* UX-05: botones próximo/anterior pendiente */}
         {hasPrevPending&&<button style={{...S.btn(false),fontSize:10}} onClick={goPrevPending} title="Atajo: P">‹ Pendiente</button>}
         {hasNextPending&&<button style={{...S.btn(true),fontSize:10,background:"#FFF7ED",color:"#92400E",borderColor:"#FCD34D"}} onClick={goNextPending} title="Atajo: N">Pendiente ›</button>}
 
@@ -375,7 +495,6 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
         {saveStatus==="ok"&&<span style={{fontSize:10,color:"#1E7A4A",fontFamily:"var(--mono)"}}>✓ Guardado</span>}
         {saveStatus==="error"&&<span style={{fontSize:10,color:"#C0392B",fontFamily:"var(--mono)"}}>⚠ Error al guardar</span>}
 
-        {/* UX-05: atajo V = validar */}
         <div style={{marginLeft:"auto"}}>
           {trip.validated
             ? <span style={{fontSize:11,color:"#1E7A4A",fontWeight:600}}>✓ Validado</span>
@@ -384,7 +503,7 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
         </div>
       </div>
 
-      {/* UX-11: barra de progreso de clasificación en ZC */}
+      {/* UX-11: barra ZC */}
       {zcPoints.length>0&&(
         <div style={{padding:"5px 16px",background:zcFaltantes>0?"#FFFBEB":"#F0FFF4",borderBottom:"1px solid #EEF2F7",display:"flex",alignItems:"center",gap:10,flexShrink:0}}>
           <span style={{fontSize:10,color:zcFaltantes>0?"#854F0B":"#065F46",fontFamily:"var(--mono)"}}>
@@ -394,7 +513,6 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
           <div style={{flex:1,height:4,background:"#EEF2F7",borderRadius:2,overflow:"hidden",maxWidth:200}}>
             <div style={{width:`${zcPoints.length?zcClasificados.length/zcPoints.length*100:0}%`,height:"100%",background:zcFaltantes>0?"#FFA726":"#22C55E",transition:"width .3s"}}/>
           </div>
-          {/* UX-05: atajo teclado hint */}
           <span style={{fontSize:9,color:"#A5B5CC",fontFamily:"var(--mono)"}}>N=sig.pendiente · V=validar · Esc=salir</span>
         </div>
       )}
@@ -408,7 +526,6 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
             <TileLayer attribution="© OpenStreetMap contributors" url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"/>
             <MapFit points={points}/>
 
-            {/* UX-16: zonas con relleno semitransparente + tooltip */}
             {Object.entries(ZONES).map(([key,z])=>(
               <Polygon key={key}
                 positions={z.polygon.map(([a,b])=>[a,b])}
@@ -417,10 +534,8 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
               </Polygon>
             ))}
 
-            {/* Ruta */}
             {segments.map((s,i)=><Polyline key={i} positions={s.pos} color={s.color} weight={3} opacity={0.85}/>)}
 
-            {/* Puntos WORKING_STOP */}
             {points.map((p,i)=>{
               if (p.state!=="WORKING_STOP") return null;
               const col = p.servicio_num!=null?svcColor(p.servicio_num):"#9E9E9E";
@@ -446,7 +561,6 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
               );
             })}
 
-            {/* UX-12: marcadores inicio/fin con etiqueta S/F */}
             {points.length>0&&<>
               <CircleMarker center={[points[0].lat,points[0].lon]} radius={9} color="#fff" weight={3} fillColor="#213363" fillOpacity={1}>
                 <Popup><strong>S — Zarpe</strong><br/>{fmtDate(trip.dateStart)} {fmtTime(trip.dateStart)} {TZ_LABEL}<br/><span style={{fontSize:10,color:"#999"}}>{fmtTimeUTC(trip.dateStart)} UTC</span></Popup>
@@ -474,7 +588,7 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
             </div>
           </div>
 
-          {/* Stats — UX-15: duración legible */}
+          {/* Stats */}
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:5,padding:"9px 12px",borderBottom:"1px solid #EEF2F7",flexShrink:0}}>
             {[
               {v:durLabel,            l:"Duración"},
@@ -488,35 +602,44 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
             ))}
           </div>
 
-          {/* UX-18: mini timeline de estados */}
+          {/* UX-18: mini timeline */}
           <TripTimeline points={points} onSegmentClick={state=>{
             if (state==="WORKING_STOP") setFilter("SVC");
             else if (state==="IN_PORT") setFilter("ALL");
             else setFilter("MOV");
           }}/>
 
-          {/* UX-08: clusters detectados */}
+          {/* ── UX-08 + MEJORA-01: clusters ── */}
           {clusters.length>0&&(
             <div style={{padding:"6px 12px",borderBottom:"1px solid #EEF2F7",flexShrink:0}}>
-              <div style={{fontSize:9,color:"#6381A7",textTransform:"uppercase",letterSpacing:1,marginBottom:4,fontFamily:"var(--mono)"}}>Clusters ZC detectados</div>
+              <div style={{fontSize:9,color:"#6381A7",textTransform:"uppercase",letterSpacing:1,marginBottom:4,fontFamily:"var(--mono)"}}>
+                Clusters ZC detectados
+              </div>
               {clusters.map((c,ci)=>{
-                const durMs = points[c.endIdx].datetime - points[c.startIdx].datetime;
+                const durMs = c.points[c.points.length-1].datetime - c.points[0].datetime;
                 const durH  = (durMs/3600000).toFixed(1);
                 const allSameNum = c.points.every(p=>p.servicio_num===c.points[0].servicio_num&&c.points[0].servicio_num!=null);
+                const col   = allSameNum ? svcColor(c.points[0].servicio_num) : "#92400E";
+                const bgCol = allSameNum ? `${svcColor(c.points[0].servicio_num)}18` : "#FEF3C7";
                 return (
                   <div key={ci} style={{display:"flex",alignItems:"center",gap:6,padding:"4px 0",borderBottom:ci<clusters.length-1?"1px solid #F5F7FA":"none"}}>
-                    <span style={{fontSize:9,padding:"1px 5px",borderRadius:3,background:allSameNum?`${svcColor(c.points[0].servicio_num)}18`:"#FEF3C7",color:allSameNum?svcColor(c.points[0].servicio_num):"#92400E",fontFamily:"var(--mono)"}}>
+                    <span style={{fontSize:9,padding:"1px 5px",borderRadius:3,background:bgCol,color:col,fontFamily:"var(--mono)",flexShrink:0}}>
                       {allSameNum?`S${c.points[0].servicio_num}`:"Sin clasificar"}
                     </span>
                     <span style={{fontSize:9,color:"#6381A7",fontFamily:"var(--mono)",flex:1}}>
                       {c.points.length} pts · {durH}h
                     </span>
-                    {!allSameNum&&(
-                      <button style={{fontSize:9,padding:"2px 6px",borderRadius:4,background:"#EFF6FF",color:"#235C96",border:"none",cursor:"pointer"}}
-                        onClick={()=>{setFilter("SVC");setSelPt(c.startIdx);setEditing({idx:c.startIdx,pt:points[c.startIdx]});}}>
-                        Clasificar
-                      </button>
-                    )}
+                    {/* MEJORA-01: abre ClusterEditor para clasificar todo el cluster de una vez */}
+                    <button
+                      style={{
+                        fontSize:9,padding:"2px 7px",borderRadius:4,border:"none",cursor:"pointer",fontWeight:600,
+                        background: allSameNum ? `${svcColor(c.points[0].servicio_num)}18` : "#EFF6FF",
+                        color:      allSameNum ? svcColor(c.points[0].servicio_num) : "#235C96",
+                      }}
+                      onClick={()=>setEditingCluster(c)}
+                    >
+                      {allSameNum ? "✏ Reclasificar" : "Clasificar"}
+                    </button>
                   </div>
                 );
               })}
@@ -535,7 +658,6 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
             </div>
           </div>
 
-          {/* UX-03: mensaje cuando filtro SVC no tiene resultados */}
           {filter==="SVC"&&visible.length===0&&(
             <div style={{padding:"16px 12px",textAlign:"center"}}>
               <div style={{fontSize:11,color:"#6381A7",marginBottom:8}}>No hay puntos WORKING_STOP en este viaje.</div>
@@ -544,7 +666,6 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
             </div>
           )}
 
-          {/* Lista de puntos */}
           <div style={{flex:1,overflowY:"auto"}}>
             <PointsList
               visible={visible}
@@ -557,19 +678,30 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
         </div>
       </div>
 
+      {/* Modal punto individual */}
       {editing&&(
         <ServiceEditor point={editing.pt} onSave={handleSave}
           onClose={()=>{setEditing(null);setSelPt(null);}} maxSvcNum={maxSvcNum}/>
+      )}
+
+      {/* MEJORA-01: Modal cluster completo */}
+      {editingCluster&&(
+        <ClusterEditor
+          cluster={editingCluster}
+          points={points}
+          onSave={handleSaveCluster}
+          onClose={()=>setEditingCluster(null)}
+          maxSvcNum={maxSvcNum}
+        />
       )}
     </div>
   );
 }
 
-// ─── UX-18: MINI TIMELINE DE ESTADOS ─────────────────────────────────────────
+// ─── UX-18: MINI TIMELINE ────────────────────────────────────────────────────
 function TripTimeline({ points, onSegmentClick }) {
   if (!points?.length) return null;
   const total = points.length;
-  // Agrupar segmentos contiguos por estado
   const segs = [];
   let cur = null;
   points.forEach((p,i) => {
@@ -604,12 +736,6 @@ function TripTimeline({ points, onSegmentClick }) {
 }
 
 // ─── LISTA DE PUNTOS ──────────────────────────────────────────────────────────
-// UX-06: badge ZC + separadores de entrada/salida
-// UX-07: fondo amarillo en SOG < 0.5
-// UX-09: fecha solo cuando cambia (agrupada)
-// UX-10: número de fila #
-// UX-19: gap de datos AIS
-// UX-20: columna de SOG coloreada
 function PointsList({ visible, points, selPt, setSelPt, setEditing }) {
   let lastDate = null;
 
@@ -628,17 +754,14 @@ function PointsList({ visible, points, selPt, setSelPt, setEditing }) {
         const col     = isWS?(p.servicio_num!=null?svcColor(p.servicio_num):"#9E9E9E"):(STATES[p.state]?.color||"#999");
         const isSel   = selPt===realIdx;
 
-        // UX-09: agrupar por fecha LOCAL (ART), no UTC
         const thisDate = fmtDate(p.datetime);
         const showDate = thisDate!==lastDate;
         lastDate = thisDate;
 
-        // UX-06: detectar entrada/salida de ZC
         const prevVisible = vi>0?visible[vi-1]:null;
         const enteredZC = isZC && prevVisible && prevVisible.zone!=="ZONA_COMUN";
         const exitedZC  = !isZC && prevVisible && prevVisible.zone==="ZONA_COMUN";
 
-        // UX-19: gap entre puntos consecutivos
         let gapWarning = null;
         if (realIdx>0) {
           const prev = points[realIdx-1];
@@ -650,21 +773,18 @@ function PointsList({ visible, points, selPt, setSelPt, setEditing }) {
 
         return (
           <div key={vi}>
-            {/* UX-09: separador de fecha */}
             {showDate&&(
               <div style={{padding:"3px 10px",background:"#F8FAFC",fontSize:8,color:"#6381A7",fontFamily:"var(--mono)",borderBottom:"1px solid #EEF2F7",borderTop:vi>0?"1px solid #EEF2F7":"none",display:"flex",justifyContent:"space-between"}}>
                 <span style={{fontWeight:600}}>{thisDate} {TZ_LABEL}</span>
               </div>
             )}
 
-            {/* UX-19: gap warning */}
             {gapWarning&&(
               <div style={{padding:"2px 10px",background:"#FFFBEB",fontSize:8,color:"#92400E",fontFamily:"var(--mono)",borderBottom:"1px solid #FCD34D"}}>
                 ⚠ {gapWarning}
               </div>
             )}
 
-            {/* UX-06: separador entrada ZC */}
             {enteredZC&&(
               <div style={{padding:"2px 10px",background:"#EFF6FF",fontSize:8,color:"#235C96",fontFamily:"var(--mono)",borderBottom:"1px solid #BFDBFE",borderTop:"1px solid #BFDBFE",fontWeight:600}}>
                 ↓ Entró a Zona Común
@@ -676,23 +796,19 @@ function PointsList({ visible, points, selPt, setSelPt, setEditing }) {
                 display:"grid",gridTemplateColumns:"22px 54px 38px 1fr 16px",
                 gap:4,padding:"5px 10px",
                 borderBottom:"1px solid #F5F7FA",cursor:"pointer",alignItems:"center",
-                // UX-07: fondo amarillo en paradas
                 background:isSel?(isWS?"#F0FFF4":"#EFF6FF"):isSlowStop?"#FFFDE7":"transparent",
                 borderLeft:isSel?`3px solid ${isWS?"#1E7A4A":"#235C96"}`:"3px solid transparent",
               }}
               onClick={()=>{setSelPt(realIdx);if(isWS)setEditing({idx:realIdx,pt:p});}}
               onKeyDown={e=>{if(e.key==="Enter"||e.key===" "){setSelPt(realIdx);if(isWS)setEditing({idx:realIdx,pt:p});}}}
             >
-              {/* UX-10: número de fila */}
               <span style={{fontFamily:"var(--mono)",fontSize:8,color:"#C4CADC",textAlign:"center"}}>{realIdx+1}</span>
 
-              {/* Hora: ART principal + UTC secundario */}
               <span style={{fontFamily:"var(--mono)",lineHeight:1.2}}>
                 <span style={{fontSize:10,color:"#213363",display:"block"}}>{fmtTime(p.datetime)}</span>
                 <span style={{fontSize:8,color:"#A5B5CC",display:"block"}}>{fmtTimeUTC(p.datetime)} UTC</span>
               </span>
 
-              {/* SOG coloreado — UX-07: ancla si SOG=0, tooltip en SOG bajo */}
               <span
                 style={{fontFamily:"var(--mono)",fontSize:10,textAlign:"right",color:p.sog===null?"#A5B5CC":p.sog>3?"#235C96":p.sog<=0.5?"#1E7A4A":"#854F0B"}}
                 title={p.sog!=null&&p.sog<=0.5?"Velocidad muy baja (SOG < 0.5 kn)":undefined}
@@ -703,21 +819,18 @@ function PointsList({ visible, points, selPt, setSelPt, setEditing }) {
                 {p.sog!==null&&p.sog!==0&&<span style={{fontSize:7}}>kn</span>}
               </span>
 
-              {/* Etiqueta estado/servicio + UX-06: badge ZC */}
               <span style={{display:"flex",alignItems:"center",gap:3,overflow:"hidden"}}>
                 <span style={{fontSize:8,padding:"2px 4px",borderRadius:3,background:`${col}18`,color:col,border:`1px solid ${col}44`,fontFamily:"var(--mono)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>
                   {p.servicio_num!=null
                     ?`S${p.servicio_num}${p.tipo_servicio&&!["SIN_CLASIFICAR","BORRADO"].includes(p.tipo_servicio)?` · ${SERVICE_TYPES[p.tipo_servicio]?.label||""}`:""}`
                     :(STATES[p.state]?.label||p.state)}
                 </span>
-                {/* UX-06: badge ZC */}
                 {isZC&&<span style={{fontSize:7,padding:"1px 3px",borderRadius:2,background:"#DBEAFE",color:"#1E40AF",fontFamily:"var(--mono)",flexShrink:0}}>ZC</span>}
               </span>
 
               <span style={{fontSize:11,color:isSel?"#235C96":"#D6E0ED",textAlign:"center"}}>{isWS?"✏":""}</span>
             </div>
 
-            {/* UX-06: separador salida ZC */}
             {exitedZC&&(
               <div style={{padding:"2px 10px",background:"#F8FAFC",fontSize:8,color:"#6381A7",fontFamily:"var(--mono)",borderBottom:"1px solid #EEF2F7"}}>
                 ↑ Salió de Zona Común
