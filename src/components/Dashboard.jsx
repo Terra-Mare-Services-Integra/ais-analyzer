@@ -37,7 +37,9 @@ export default function Dashboard({ data, onGoTrips, onGoUpload, firstPendingTri
   const kpis = useMemo(() => data?.trips ? aggregateKPIs(data.trips) : null, [data?.trips]);
   if (!data||!kpis) return <EmptyDashboard onGoUpload={onGoUpload}/>;
 
-  const pct   = data.trips.length ? Math.round(kpis.validatedTrips/data.trips.length*100) : 0;
+  // BUG-03: porcentaje sobre viajes revisables, no sobre el total (excluye sin datos)
+  const reviewable = kpis.reviewableTrips ?? kpis.totalTrips;
+  const pct   = reviewable ? Math.round(kpis.validatedTrips/reviewable*100) : 0;
   const maxOp = Math.max(...SVC_ROWS.map(s=>kpis.ops[s.key]),1);
   const dateRange = fmtDateRange(data.trips);
 
@@ -46,7 +48,7 @@ export default function Dashboard({ data, onGoTrips, onGoUpload, firstPendingTri
   const revenueExtra=(kpis.ops.agua_zc*AGUA_PRECIO_USD*AGUA_SERVICIOS_AÑO)+(kpis.ops.slop_zc*SLOP_PRECIO_USD*SLOP_SERVICIOS_AÑO);
 
   const kpiCards = [
-    {val:kpis.totalTrips,     lbl:"Viajes",     sub:"total detectados",  col:"#235C96"},
+    {val:kpis.reviewableTrips??kpis.totalTrips, lbl:"Viajes",     sub:kpis.noDataTrips>0?`${kpis.noDataTrips} sin datos AIS`:"total con datos", col:"#235C96"},
     {val:kpis.validatedTrips, lbl:"Validados",  sub:`${pct}% del total`, col:"#1E7A4A"},
     {val:kpis.totalServices,  lbl:"Servicios",  sub:"detectados",        col:"#1E7A4A"},
     {val:kpis.ops.agua_zc,    lbl:"Agua / ZC",  sub:"→ P&L B108",        col:"#2196F3"},
@@ -80,7 +82,7 @@ export default function Dashboard({ data, onGoTrips, onGoUpload, firstPendingTri
       {/* Validación */}
       <div style={{background:"#FFFBEB",border:"1px solid #FCD34D",borderRadius:9,padding:"12px 16px",marginBottom:20,fontSize:12,color:"#854F0B",lineHeight:1.6}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-          <strong>Validación: {kpis.validatedTrips}/{data.trips.length} viajes</strong>
+          <strong>Validación: {kpis.validatedTrips}/{reviewable} viajes con datos</strong>
           <span style={{fontFamily:"var(--mono)",fontSize:13,fontWeight:700}}>{pct}%</span>
         </div>
         <div role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}
