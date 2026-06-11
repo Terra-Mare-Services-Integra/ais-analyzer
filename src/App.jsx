@@ -95,17 +95,24 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
 }
 `;
 
+// ─── TIMEZONE ────────────────────────────────────────────────────────────────
+const TZ_OFFSET_HS = -3;
+const TZ_LABEL     = "ART";
+function toLocal(d) {
+  if (!d) return null;
+  const dt = d instanceof Date ? d : new Date(d);
+  if (isNaN(dt.getTime())) return null;
+  return new Date(dt.getTime() + TZ_OFFSET_HS * 3600000);
+}
 function fmtDate(dt) {
-  if (!dt) return "—";
-  const d = dt instanceof Date ? dt : new Date(dt);
-  if (isNaN(d.getTime())) return "—";
-  return `${String(d.getUTCDate()).padStart(2,"0")}/${String(d.getUTCMonth()+1).padStart(2,"0")}/${String(d.getUTCFullYear()).slice(-2)}`;
+  const loc = toLocal(dt);
+  if (!loc) return "—";
+  return `${String(loc.getUTCDate()).padStart(2,"0")}/${String(loc.getUTCMonth()+1).padStart(2,"0")}/${String(loc.getUTCFullYear()).slice(-2)}`;
 }
 function fmtTime(dt) {
-  if (!dt) return "—";
-  const d = dt instanceof Date ? dt : new Date(dt);
-  if (isNaN(d.getTime())) return "—";
-  return `${String(d.getUTCHours()).padStart(2,"0")}:${String(d.getUTCMinutes()).padStart(2,"0")}`;
+  const loc = toLocal(dt);
+  if (!loc) return "—";
+  return `${String(loc.getUTCHours()).padStart(2,"0")}:${String(loc.getUTCMinutes()).padStart(2,"0")}`;
 }
 function fmtDuration(hs) {
   if (hs==null||isNaN(hs)) return "—";
@@ -386,7 +393,7 @@ function TripsList({ trips, onSelectTrip }) {
       </div>
 
       <div style={{marginBottom:14,fontSize:10,color:"var(--muted)",fontFamily:"var(--mono)",background:"#EEF2F7",display:"inline-block",padding:"4px 10px",borderRadius:5}}>
-        ⏱ Horarios en UTC · Formato 24h
+        ⏱ Horarios en ART (UTC-3) · Formato 24h
       </div>
 
       {filtered.length===0&&(
@@ -398,7 +405,7 @@ function TripsList({ trips, onSelectTrip }) {
       {filtered.length>0&&(
         <div style={{background:"#fff",border:"1px solid #D6E0ED",borderRadius:10,overflow:"hidden"}}>
           <div style={{display:"grid",gridTemplateColumns:"36px 145px 1fr 55px 70px 65px 90px",gap:8,padding:"7px 14px",background:"#213363"}}>
-            {["#","Fechas (UTC)","Zonas","Svc","Duración","Dist.","Estado"].map(h=>(
+            {["#","Fechas (ART)","Zonas","Svc","Duración","Dist.","Estado"].map(h=>(
               <span key={h} style={{fontSize:9,fontWeight:600,color:"rgba(255,255,255,.55)",textTransform:"uppercase",letterSpacing:.5}}>{h}</span>
             ))}
           </div>
@@ -433,7 +440,7 @@ function TripRow({ trip, onClick }) {
       <span style={{fontFamily:"var(--mono)",fontSize:11,fontWeight:700,color:"#235C96",textAlign:"center"}}>{t.id}</span>
       <span style={{fontFamily:"var(--mono)",fontSize:10,color:"#6381A7",lineHeight:1.5}}>
         {fmtDate(t.dateStart)}<br/>
-        <span style={{fontSize:9}}>{fmtTime(t.dateStart)} → {fmtTime(t.dateEnd)}</span>
+        <span style={{fontSize:9}}>{fmtTime(t.dateStart)} → {fmtTime(t.dateEnd)} {TZ_LABEL}</span>
       </span>
       <span style={{display:"flex",gap:3,flexWrap:"wrap"}}>
         {t.zones.slice(0,3).map(z=>(
