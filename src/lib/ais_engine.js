@@ -437,10 +437,17 @@ export function aggregateKPIs(trips) {
     }
   }
 
+  // BUG-03: viajes sin puntos AIS no son revisables — excluirlos de los conteos
+  // operativos para que el Dashboard muestre numeros consistentes con la lista.
+  const tripsWithData    = trips.filter(t => t.points?.length > 0);
+  const tripsWithoutData = trips.length - tripsWithData.length;
+
   return {
-    totalTrips:     trips.length,
-    validatedTrips: trips.filter(t => t.validated).length,
-    pendingTrips:   trips.filter(t => !t.validated).length,
+    totalTrips:      trips.length,           // total real incluyendo vacios (para denominador)
+    reviewableTrips: tripsWithData.length,   // viajes con datos = los que el operador revisa
+    validatedTrips:  tripsWithData.filter(t => t.validated).length,
+    pendingTrips:    tripsWithData.filter(t => !t.validated).length,
+    noDataTrips:     tripsWithoutData,
     incompleteTrips: trips.filter(t => t.incomplete).length,
     totalServices,
     ops,
