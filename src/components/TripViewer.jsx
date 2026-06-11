@@ -728,12 +728,14 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
               if (p.state!=="WORKING_STOP") return null;
               const col = p.servicio_num!=null?svcColor(p.servicio_num):"#9E9E9E";
               const isSel = selPt===i;
+              // MEJORA-08: detectar si este punto pertenece a algún cluster detectado
+              const pointCluster = clusters.find(c => i >= c.startIdx && i <= c.endIdx) ?? null;
               return (
                 <CircleMarker key={i} center={[p.lat,p.lon]} radius={isSel?10:8}
                   color={isSel?"#fff":col} weight={isSel?3:2} fillColor={col} fillOpacity={0.9}
                   eventHandlers={{click:()=>{setSelPt(i);setEditing({idx:i,pt:p});}}}>
                   <Popup>
-                    <div style={{fontSize:12,minWidth:190}}>
+                    <div style={{fontSize:12,minWidth:200}}>
                       <strong>{fmtDate(p.datetime)} {fmtTime(p.datetime)} {TZ_LABEL}</strong><br/>
                       <span style={{fontSize:10,color:"#999"}}>{fmtTimeUTC(p.datetime)} UTC</span><br/>
                       SOG: {p.sog!=null?`${Number(p.sog).toFixed(1)} kn`:"—"} | {p.zone}<br/>
@@ -741,8 +743,15 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
                       {p.servicio_num!=null&&p.tipo_servicio&&!["SIN_CLASIFICAR","BORRADO"].includes(p.tipo_servicio)&&(
                         <><br/><em style={{color:col}}>S{p.servicio_num} · {SERVICE_TYPES[p.tipo_servicio]?.label}</em></>
                       )}
-                      <button style={{marginTop:7,width:"100%",padding:"6px 0",borderRadius:6,background:"#235C96",color:"#fff",border:"none",fontSize:11,cursor:"pointer",fontWeight:600}}
-                        onClick={()=>setEditing({idx:i,pt:p})}>✏ Clasificar</button>
+                      {/* MEJORA-08: botón cluster si el punto pertenece a uno */}
+                      {pointCluster&&(
+                        <button style={{marginTop:7,width:"100%",padding:"6px 0",borderRadius:6,background:"#E91E63",color:"#fff",border:"none",fontSize:11,cursor:"pointer",fontWeight:600}}
+                          onClick={()=>{setEditingCluster(pointCluster);}}>
+                          ⬡ Cluster ({pointCluster.points.length} pts)
+                        </button>
+                      )}
+                      <button style={{marginTop:pointCluster?4:7,width:"100%",padding:"6px 0",borderRadius:6,background:"#235C96",color:"#fff",border:"none",fontSize:11,cursor:"pointer",fontWeight:600}}
+                        onClick={()=>setEditing({idx:i,pt:p})}>✏ Clasificar punto</button>
                     </div>
                   </Popup>
                 </CircleMarker>
