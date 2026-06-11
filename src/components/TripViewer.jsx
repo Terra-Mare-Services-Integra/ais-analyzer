@@ -470,8 +470,23 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
 
   const durLabel = fmtDuration(trip.durationHs);
 
+  // MEJORA-04: continuidad entre viajes
+  // Si el viaje anterior terminó hace menos de 2 horas, mostrar banner de contexto.
+  const prevTrip = tripIdx > 0 ? trips[tripIdx - 1] : null;
+  const continuityGapMin = prevTrip?.dateEnd && trip.dateStart
+    ? Math.round((new Date(trip.dateStart) - new Date(prevTrip.dateEnd)) / 60000)
+    : null;
+  const isContinuation = continuityGapMin !== null && continuityGapMin >= 0 && continuityGapMin < 120;
+  const continuityLabel = isContinuation
+    ? continuityGapMin < 2
+      ? `← Continuación del Viaje #${prevTrip.id} (terminó hace menos de 1 min)`
+      : continuityGapMin < 60
+        ? `← Continuación del Viaje #${prevTrip.id} (terminó hace ${continuityGapMin} min)`
+        : `← Continuación del Viaje #${prevTrip.id} (terminó hace ${Math.round(continuityGapMin/60*10)/10}h)`
+    : null;
+
   return (
-    <div style={{display:"flex",flexDirection:"column",height:"calc(100vh - 52px)"}}>
+    <div style={{display:"flex",flexDirection:"column",height:"calc(100vh - 52px)"}}>>
 
       {/* ── TOPBAR ── */}
       <div style={{display:"flex",alignItems:"center",gap:8,padding:"9px 16px",borderBottom:"1px solid #D6E0ED",background:"#fff",flexShrink:0,flexWrap:"wrap"}}>
@@ -502,6 +517,19 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
           }
         </div>
       </div>
+
+      {/* MEJORA-04: banner de continuidad */}
+      {continuityLabel&&(
+        <div style={{padding:"4px 16px",background:"#F5F3FF",borderBottom:"1px solid #DDD6FE",display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+          <span style={{fontSize:10,color:"#6D28D9",fontFamily:"var(--mono)"}}>
+            {continuityLabel}
+          </span>
+          <button style={{marginLeft:"auto",fontSize:9,padding:"1px 7px",borderRadius:4,border:"1px solid #DDD6FE",background:"#EDE9FE",color:"#6D28D9",cursor:"pointer",fontFamily:"var(--mono)"}}
+            onClick={()=>goTrip(tripIdx-1)}>
+            Ver viaje anterior
+          </button>
+        </div>
+      )}
 
       {/* UX-11: barra ZC */}
       {zcPoints.length>0&&(
