@@ -120,6 +120,41 @@ function fmtDuration(hs) {
   return days>0?`${days}d ${hrs}h`:`${hrs}h`;
 }
 
+// ─── BUG-02: HASH NAVIGATION ─────────────────────────────────────────────────
+// Formato:
+//   #/dashboard          → tab Dashboard
+//   #/viajes             → tab Viajes, lista
+//   #/viajes/27          → tab Viajes, viaje #27 abierto
+//   #/upload             → tab Upload
+//
+// readHash() lee window.location.hash y devuelve { tab, tripId }.
+// writeHash() escribe el hash a partir del estado actual.
+// No depende de ningún router externo — funciona con Vite + Vercel tal cual.
+
+function readHash() {
+  const hash = window.location.hash.replace(/^#\/?/, "").toLowerCase();
+  if (hash.startsWith("viajes/")) {
+    const id = parseInt(hash.split("/")[1], 10);
+    return { tab: "Viajes", tripId: isNaN(id) ? null : id };
+  }
+  if (hash === "viajes")    return { tab: "Viajes",    tripId: null };
+  if (hash === "upload")    return { tab: "Upload",    tripId: null };
+  // dashboard o vacío → Dashboard
+  return { tab: "Dashboard", tripId: null };
+}
+
+function writeHash(tab, tripId) {
+  let hash;
+  if (tab === "Viajes" && tripId !== null) hash = `#/viajes/${tripId}`;
+  else if (tab === "Viajes")               hash = `#/viajes`;
+  else if (tab === "Upload")               hash = `#/upload`;
+  else                                     hash = `#/dashboard`;
+  // Usar replaceState cuando solo cambia el viaje dentro de Viajes,
+  // pushState en los demás casos para que el botón Atrás funcione entre tabs.
+  if (window.location.hash === hash) return;
+  window.history.pushState(null, "", hash);
+}
+
 async function loadUploadFromSupabase(uploadRecord) {
   const { data: tripRows, error: trErr } = await supabase
     .from("ais_trips").select("*").eq("upload_id", uploadRecord.id).order("trip_num");
@@ -219,12 +254,39 @@ export default function App() {
   const [loadingUpload,   setLoadingUpload]   = useState(false);
   const [logoutBusy,      setLogoutBusy]      = useState(false);
 
+  // ─── AUTH ───────────────────────────────────────────────────────────────────
   useEffect(() => {
     let mounted = true;
     supabase.auth.getSession().then(({data:{session:s}}) => { if (mounted){setSession(s);setLoading(false);} });
     const {data:{subscription}} = supabase.auth.onAuthStateChange((_e,s) => { if (mounted) setSession(s); });
     return () => { mounted=false; subscription.unsubscribe(); };
   }, []);
+
+  // ─── BUG-02: LEER HASH AL MONTAR Y ESCUCHAR CAMBIOS ─────────────────────────
+  // Al montar: restaura tab y viaje desde el hash actual (recarga o link directo).
+  // hashchange: sincroniza el estado cuando el usuario usa los botones
+  //             Atrás/Adelante del browser.
+  // Nota: el hash puede apuntar a un viaje (ej. #/viajes/27) pero los datos AIS
+  // aún no están cargados. En ese caso se restaura el tab "Viajes" y el tripId;
+  // cuando los datos carguen, viewingIdx se resolverá automáticamente.
+  useEffect(() => {
+    const applyHash = () => {
+      const { tab: t, tripId } = readHash();
+      setTab(t);
+      setViewingTripId(tripId);
+    };
+    applyHash(); // lectura inicial
+    window.addEventListener("hashchange", applyHash);
+    return () => window.removeEventListener("hashchange", applyHash);
+  }, []);
+
+  // ─── BUG-02: ESCRIBIR HASH CUANDO CAMBIA EL ESTADO ──────────────────────────
+  // Cada vez que tab o viewingTripId cambian desde el código (clicks en la UI),
+  // sincronizamos el hash. hashchange no se dispara al hacer pushState,
+  // así que no hay loop.
+  useEffect(() => {
+    writeHash(tab, viewingTripId);
+  }, [tab, viewingTripId]);
 
   const refreshUploads = useCallback(async () => {
     const data = await fetchUploads();
