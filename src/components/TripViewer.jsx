@@ -154,20 +154,50 @@ function ServiceEditor({ point, onSave, onClose, maxSvcNum }) {
   );
 }
 
-// ─── MEJORA-01: CLUSTER EDITOR MODAL ─────────────────────────────────────────
+// ─── MEJORA-01 + MEJORA-06: CLUSTER EDITOR MODAL ────────────────────────────
 // Clasifica TODOS los puntos del cluster de una sola acción.
-// Muestra cuántos puntos y la duración para dar contexto al operador.
+// MEJORA-06: si el cluster no tiene clasificación previa, sugiere tipo y zona
+// automáticamente basándose en la zona dominante de los puntos.
+
+// Regla de sugerencia de tipo según zona dominante del cluster
+function suggestTypeForZone(zonaDominante) {
+  if (zonaDominante === "ZONA_COMUN")  return "AGUA";
+  if (zonaDominante === "ZONA_ALFA")   return "ALIJO_ZC";
+  if (zonaDominante === "ZONA_DELTA")  return "ALIJO_ZC";
+  if (zonaDominante === "RECALADA")    return "AGUA";
+  return "AGUA";
+}
+
+// Zona más frecuente entre los puntos del cluster
+function dominantZone(clusterPoints) {
+  const counts = {};
+  for (const p of clusterPoints) {
+    if (p.zone && p.zone !== "OPEN_SEA") counts[p.zone] = (counts[p.zone] || 0) + 1;
+  }
+  return Object.entries(counts).sort((a,b) => b[1]-a[1])[0]?.[0] ?? "ZONA_COMUN";
+}
+
 function ClusterEditor({ cluster, points, onSave, onClose, maxSvcNum }) {
   const firstClassified = cluster.points.find(p => p.servicio_num != null);
+
+  // MEJORA-06: calcular sugerencia automática cuando no hay clasificación previa
+  const hasPrior    = !!firstClassified;
+  const sugZona     = hasPrior ? null : dominantZone(cluster.points);
+  const sugTipo     = hasPrior ? null : suggestTypeForZone(sugZona);
+  const isSuggested = !hasPrior; // true = valores vienen de sugerencia automática
+
   const [svc,    setSvc]    = useState(
     firstClassified?.tipo_servicio && !["SIN_CLASIFICAR","BORRADO"].includes(firstClassified.tipo_servicio)
-      ? firstClassified.tipo_servicio : "AGUA"
+      ? firstClassified.tipo_servicio : (sugTipo ?? "AGUA")
   );
   const [zona,   setZona]   = useState(
     firstClassified?.zona_servicio && ZONAS_OP.includes(firstClassified.zona_servicio)
-      ? firstClassified.zona_servicio : "ZONA_COMUN"
+      ? firstClassified.zona_servicio : (sugZona ?? "ZONA_COMUN")
   );
-  const [svcNum, setSvcNum] = useState(firstClassified?.servicio_num ?? null);
+  // MEJORA-06: pre-seleccionar el próximo número de servicio si es cluster nuevo
+  const [svcNum, setSvcNum] = useState(
+    firstClassified?.servicio_num ?? (maxSvcNum > 0 ? maxSvcNum + 1 : 1)
+  );
 
   const svcNums = Array.from({ length: (maxSvcNum||0)+1 }, (_,i) => i+1);
 
@@ -222,16 +252,29 @@ function ClusterEditor({ cluster, points, onSave, onClose, maxSvcNum }) {
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5,marginBottom:14}}>
             {SVCS_CLASIFICABLES.map(s=>{
               const info=SERVICE_TYPES[s], sel=svc===s;
-              return <button key={s} style={{padding:"8px 6px",borderRadius:6,fontSize:10,cursor:"pointer",textAlign:"center",border:`1.5px solid ${sel?info.color:"#D6E0ED"}`,background:sel?`${info.color}18`:"#fff",color:sel?info.color:"#213363",fontWeight:sel?700:400,transition:"all .12s"}}
-                onClick={()=>setSvc(s)}>{info.label}</button>;
+              return <button key={s} style={{padding:"8px 6px",borderRadius:6,fontSize:10,cursor:"pointer",textAlign:"center",border:`1.5px solid ${sel?info.color:"#D6E0ED"}`,background:sel?`${info.color}18`:"#fff",color:sel?info.color:"#213363",fontWeight:sel?700:400,transition:"all .12s",position:"relative"}}
+                onClick={()=>setSvc(s)}>
+                {info.label}
+                {isSuggested&&s===sugTipo&&<span style={{position:"absolute",top:-6,right:-4,fontSize:7,background:"#7C3AED",color:"#fff",borderRadius:3,padding:"1px 3px",fontFamily:"var(--mono)",lineHeight:1}}>✦</span>}
+              </button>;
             })}
           </div>
           <div style={{fontSize:10,fontWeight:600,color:"#6381A7",textTransform:"uppercase",letterSpacing:".8px",marginBottom:8}}>Zona operativa</div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5,marginBottom:16}}>
-            {ZONAS_OP.map(z=>{const sel=zona===z;return<button key={z} style={{padding:"7px 8px",borderRadius:6,fontSize:10,cursor:"pointer",textAlign:"center",border:`1.5px solid ${sel?"#235C96":"#D6E0ED"}`,background:sel?"#EFF6FF":"#fff",color:sel?"#235C96":"#213363",fontWeight:sel?600:400,transition:"all .12s"}}
-              onClick={()=>setZona(z)}>{z.replace(/_/g," ")}</button>;})}
+            {ZONAS_OP.map(z=>{const sel=zona===z;return<button key={z} style={{padding:"7px 8px",borderRadius:6,fontSize:10,cursor:"pointer",textAlign:"center",border:`1.5px solid ${sel?"#235C96":"#D6E0ED"}`,background:sel?"#EFF6FF":"#fff",color:sel?"#235C96":"#213363",fontWeight:sel?600:400,transition:"all .12s",position:"relative"}}
+              onClick={()=>setZona(z)}>
+              {z.replace(/_/g," ")}
+              {isSuggested&&z===sugZona&&<span style={{position:"absolute",top:-6,right:-4,fontSize:7,background:"#7C3AED",color:"#fff",borderRadius:3,padding:"1px 3px",fontFamily:"var(--mono)",lineHeight:1}}>✦</span>}
+            </button>;})}
           </div>
         </>}
+
+        {/* MEJORA-06: nota de sugerencia automática */}
+        {isSuggested&&svcNum!==null&&(
+          <div style={{fontSize:9,color:"#7C3AED",fontFamily:"var(--mono)",marginBottom:10,padding:"4px 8px",background:"#F5F3FF",borderRadius:5,border:"1px solid #DDD6FE"}}>
+            ✦ Tipo y zona pre-seleccionados automáticamente. Confirmá o modificá según corresponda.
+          </div>
+        )}
 
         <div style={{display:"flex",gap:7}}>
           <button style={{flex:1,padding:"9px 0",borderRadius:7,background:"#235C96",color:"#fff",border:"none",fontSize:12,fontWeight:600,cursor:"pointer"}}
