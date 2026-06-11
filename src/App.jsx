@@ -207,6 +207,119 @@ async function loadUploadFromSupabase(uploadRecord) {
   return { uploadId:uploadRecord.id, filename:uploadRecord.filename, trips, loadedAt:new Date() };
 }
 
+// ─── MEJORA-09: EXPORTAR CSV ─────────────────────────────────────────────────
+// Genera un CSV con una fila por servicio validado, listo para el modelo FSV.
+// Agrupa los puntos WORKING_STOP por (viaje, servicio_num) y calcula los KPIs
+// de cada grupo: inicio, fin, duración, tipo, zona, SOG min/max.
+// Se ejecuta 100% en el cliente — sin dependencias externas.
+
+const TZ_OFFSET_CSV = -3; // ART
+
+function toLocalCSV(d) {
+  if (!d) return null;
+  const dt = d instanceof Date ? d : new Date(d);
+  if (isNaN(dt.getTime())) return null;
+  return new Date(dt.getTime() + TZ_OFFSET_CSV * 3600000);
+}
+function fmtDateCSV(d) {
+  const loc = toLocalCSV(d); if (!loc) return "";
+  return `${String(loc.getUTCDate()).padStart(2,"0")}/${String(loc.getUTCMonth()+1).padStart(2,"0")}/${loc.getUTCFullYear()}`;
+}
+function fmtTimeCSV(d) {
+  const loc = toLocalCSV(d); if (!loc) return "";
+  return `${String(loc.getUTCHours()).padStart(2,"0")}:${String(loc.getUTCMinutes()).padStart(2,"0")}`;
+}
+
+export function exportCSV(trips, filename = "servicios_ais.csv") {
+  const TZ_LABEL_CSV = "ART";
+  const headers = [
+    "viaje_id","fecha","hora_inicio","hora_fin","duracion_hs",
+    "tipo_servicio","zona","servicio_num","sog_min","sog_max","validado"
+  ];
+
+  const rows = [];
+
+  for (const trip of trips) {
+    if (!trip.validated) continue;
+    if (!trip.points?.length) continue;
+
+    // Agrupar puntos WORKING_STOP por servicio_num
+    const groups = {};
+    for (const p of trip.points) {
+      if (p.state !== "WORKING_STOP") continue;
+      if (p.servicio_num == null) continue;
+      if (!groups[p.servicio_num]) groups[p.servicio_num] = [];
+      groups[p.servicio_num].push(p);
+    }
+
+    for (const [numStr, pts] of Object.entries(groups)) {
+      const num = Number(numStr);
+      const sorted = [...pts].sort((a,b) => new Date(a.datetime) - new Date(b.datetime));
+      const first  = sorted[0];
+      const last   = sorted[sorted.length - 1];
+
+      const dtStart = first.datetime instanceof Date ? first.datetime : new Date(first.datetime);
+      const dtEnd   = last.datetime  instanceof Date ? last.datetime  : new Date(last.datetime);
+      const durHs   = ((dtEnd - dtStart) / 3600000).toFixed(2);
+
+      // Tipo dominante del grupo
+      const typeCounts = {};
+      for (const p of sorted) {
+        if (p.tipo_servicio && !["SIN_CLASIFICAR","BORRADO"].includes(p.tipo_servicio))
+          typeCounts[p.tipo_servicio] = (typeCounts[p.tipo_servicio] || 0) + 1;
+      }
+      const tipo = Object.entries(typeCounts).sort((a,b)=>b[1]-a[1])[0]?.[0] ?? "";
+
+      // Zona dominante
+      const zonaCounts = {};
+      for (const p of sorted) {
+        if (p.zona_servicio) zonaCounts[p.zona_servicio] = (zonaCounts[p.zona_servicio] || 0) + 1;
+        else if (p.zone)     zonaCounts[p.zone]          = (zonaCounts[p.zone]          || 0) + 1;
+      }
+      const zona = Object.entries(zonaCounts).sort((a,b)=>b[1]-a[1])[0]?.[0] ?? "";
+
+      const sogs   = sorted.map(p=>p.sog).filter(s=>s!=null);
+      const sogMin = sogs.length ? Math.min(...sogs).toFixed(1) : "";
+      const sogMax = sogs.length ? Math.max(...sogs).toFixed(1) : "";
+
+      rows.push([
+        trip.id,
+        fmtDateCSV(dtStart),
+        fmtTimeCSV(dtStart) + " " + TZ_LABEL_CSV,
+        fmtTimeCSV(dtEnd)   + " " + TZ_LABEL_CSV,
+        durHs,
+        tipo,
+        zona,
+        `S${num}`,
+        sogMin,
+        sogMax,
+        trip.validated ? "SI" : "NO",
+      ]);
+    }
+  }
+
+  // Ordenar por viaje_id y luego por servicio_num
+  rows.sort((a,b) => a[0]-b[0] || parseInt(a[7].slice(1))-parseInt(b[7].slice(1)));
+
+  const escape = v => {
+    const s = String(v ?? "");
+    return s.includes(",") || s.includes('"') || s.includes("
+")
+      ? `"${s.replace(/"/g,'""')}"` : s;
+  };
+
+  const csv = [headers, ...rows].map(r => r.map(escape).join(",")).join("
+");
+
+  const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" }); // BOM para Excel
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href     = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 async function fetchUploads() {
   const { data, error } = await supabase.from("ais_uploads").select("*").order("created_at",{ascending:false});
   if (error) { console.error("[App] Error uploads:", error.message); return null; }
@@ -391,6 +504,8 @@ export default function App() {
               // UX-13: CTA al primer pendiente
               firstPendingTrip={firstPending}
               onGoFirstPending={firstPending?()=>{setTab("Viajes");setViewingTripId(firstPending.id);}:null}
+              // MEJORA-09: exportar CSV de servicios validados
+              onExportCSV={()=>exportCSV(trips, `servicios_${aisData?.filename?.replace(/\.[^.]+$/,"")??""}.csv`)}
             />
           )}
 
