@@ -81,6 +81,7 @@ body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:1
 .badge-pending{font-family:var(--mono);font-size:8px;padding:2px 7px;border-radius:3px;background:#F3F4F6;color:#6B7280;text-align:center}
 .badge-incomplete{font-family:var(--mono);font-size:8px;padding:2px 7px;border-radius:3px;background:#FEF3C7;color:#92400E;text-align:center}
 .badge-svc-pending{font-family:var(--mono);font-size:8px;padding:2px 5px;border-radius:3px;background:#FFF7ED;color:#C2410C;text-align:center}
+.badge-no-data{font-family:var(--mono);font-size:8px;padding:2px 7px;border-radius:3px;background:#FEF3C7;color:#92400E;text-align:center}
 @media(max-width:768px){.sb{width:200px}.topbar{padding:0 16px}}
 @media(max-width:600px){
   .shell{flex-direction:column}
@@ -421,7 +422,9 @@ function TripsList({ trips, onSelectTrip }) {
   const [onlyZC,     setOnlyZC]     = useState(false);     // MEJORA-02
 
   const validated  = trips.filter(t=>t.validated).length;
-  const pending    = trips.filter(t=>!t.validated).length;
+  // MEJORA-03: viajes sin puntos AIS no cuentan como pendientes reales
+  const noData     = trips.filter(t=>!t.points?.length).length;
+  const pending    = trips.filter(t=>!t.validated&&(t.points?.length>0)).length;
   const incomplete = trips.filter(t=>t.incomplete).length;
   // MEJORA-02: contar cuántos viajes tienen al menos 1 punto en ZONA_COMUN
   const withZC     = trips.filter(t=>t.zones?.includes("ZONA_COMUN")).length;
@@ -454,6 +457,7 @@ function TripsList({ trips, onSelectTrip }) {
           <span>✅ {validated} validados</span>
           <span>⏳ {pending} pendientes</span>
           {incomplete>0&&<span style={{color:"#92400E"}}>⚠ {incomplete} incompleto{incomplete>1?"s":""}</span>}
+          {noData>0&&<span style={{color:"#92400E"}}>⊘ {noData} sin datos</span>}
         </div>
         <div style={{marginLeft:"auto",display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
           {/* UX-14: toggle estado */}
@@ -519,7 +523,9 @@ function TripRow({ trip, onClick }) {
   const zcPending  = zcTotal - zcClasif;
 
   let badge;
-  if (t.incomplete) badge=<span className="badge-incomplete">⚠ Incompleto</span>;
+  // MEJORA-03: viaje sin puntos AIS — badge prioritario, antes que cualquier otro
+  if (!t.points?.length) badge=<span className="badge-no-data">⊘ Sin datos</span>;
+  else if (t.incomplete) badge=<span className="badge-incomplete">⚠ Incompleto</span>;
   else if (t.validated) badge=<span className="badge-ok">✓ OK</span>;
   else if (zcPending>0) badge=<span className="badge-svc-pending">{zcPending} ZC ⚠</span>;
   else badge=<span className="badge-pending">Pendiente</span>;
