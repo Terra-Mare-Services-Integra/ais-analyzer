@@ -784,7 +784,7 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
             <div style={{fontSize:10,color:"#6381A7",fontFamily:"var(--mono)",marginTop:1,lineHeight:1.6}}>
               {fmtDate(trip.dateStart)} {fmtTime(trip.dateStart)} {TZ_LABEL}<br/>
               → {fmtDate(trip.dateEnd)} {fmtTime(trip.dateEnd)} {TZ_LABEL}
-              <span style={{marginLeft:6,fontSize:8,color:"#A5B5CC"}}>({fmtTimeUTC(trip.dateStart)}–{fmtTimeUTC(trip.dateEnd)} UTC)</span>
+              <span style={{marginLeft:6,fontSize:8,color:"#A5B5CC"}}>({fmtTimeUTC(trip.dateStart)} UTC → {fmtTimeUTC(trip.dateEnd)} UTC)</span>
             </div>
           </div>
 
@@ -1032,8 +1032,8 @@ function PointsList({ visible, points, selPt, setSelPt, setEditing }) {
                 background:isSel?(isWS?"#F0FFF4":"#EFF6FF"):isSlowStop?"#FFFDE7":"transparent",
                 borderLeft:isSel?`3px solid ${isWS?"#1E7A4A":"#235C96"}`:"3px solid transparent",
               }}
-              onClick={()=>{setSelPt(realIdx);if(isWS)setEditing({idx:realIdx,pt:p});}}
-              onKeyDown={e=>{if(e.key==="Enter"||e.key===" "){setSelPt(realIdx);if(isWS)setEditing({idx:realIdx,pt:p});}}}
+              onClick={()=>{setSelPt(realIdx);if(isWS&&isZC)setEditing({idx:realIdx,pt:p});}}
+              onKeyDown={e=>{if(e.key==="Enter"||e.key===" "){setSelPt(realIdx);if(isWS&&isZC)setEditing({idx:realIdx,pt:p});}}}
             >
               <span style={{fontFamily:"var(--mono)",fontSize:8,color:"#C4CADC",textAlign:"center"}}>{realIdx+1}</span>
 
@@ -1056,7 +1056,7 @@ function PointsList({ visible, points, selPt, setSelPt, setEditing }) {
                 <span style={{fontSize:8,padding:"2px 4px",borderRadius:3,background:`${col}18`,color:col,border:`1px solid ${col}44`,fontFamily:"var(--mono)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>
                   {p.servicio_num!=null
                     ?`S${p.servicio_num}${p.tipo_servicio&&!["SIN_CLASIFICAR","BORRADO"].includes(p.tipo_servicio)?` · ${SERVICE_TYPES[p.tipo_servicio]?.label||""}`:""}`
-                    :(STATES[p.state]?.label||p.state)}
+                    :(p.state==="WORKING_STOP"&&p.sog!=null&&p.sog>=4?"Navegando":STATES[p.state]?.label||p.state)}
                 </span>
                 {isZC&&<span style={{fontSize:7,padding:"1px 3px",borderRadius:2,background:"#DBEAFE",color:"#1E40AF",fontFamily:"var(--mono)",flexShrink:0}}>ZC</span>}
               </span>
