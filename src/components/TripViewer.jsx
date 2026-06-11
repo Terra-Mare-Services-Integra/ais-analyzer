@@ -260,33 +260,62 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
 
   const maxSvcNum = Math.max(0,...points.map(p=>p.servicio_num||0));
 
-  // handleSave
+  // ─── BUG-01 FIX: handleSave ───────────────────────────────────────────────
+  // Separado en dos fases:
+  // Fase 1 — actualización local (siempre exitosa, síncrona).
+  // Fase 2 — persistencia en Supabase (solo si hay supabaseId; errores reales
+  //           de red/RLS activan el mensaje de error, no un if vacío).
   const handleSave = useCallback(async updated => {
-    setSaving(true); setSaveStatus(null);
+    // Fase 1: actualización local — inmediata, nunca falla
     const newTrips = trips.map((t,ti)=>{
       if (ti!==tripIdx) return t;
       const newPoints = t.points.map((p,pi)=>pi===editing.idx?updated:p);
       const servicios = new Set(newPoints.filter(p=>p.servicio_num!=null&&p.tipo_servicio!=="BORRADO").map(p=>p.servicio_num));
       return {...t, points:newPoints, nServices:servicios.size};
     });
-    setTrips(newTrips); setEditing(null); setSelPt(null);
+    setTrips(newTrips);
+    setEditing(null);
+    setSelPt(null);
+
+    // Fase 2: persistencia remota — solo si el viaje tiene ID en Supabase
+    const ct = newTrips[tripIdx];
+    if (!ct?.supabaseId) {
+      // Viaje solo en memoria (cargado desde Excel, no persistido aún).
+      // El guardado local ya ocurrió — no mostrar nada.
+      return;
+    }
+
+    setSaving(true);
+    setSaveStatus(null);
     try {
-      const ct = newTrips[tripIdx];
-      if (ct?.supabaseId) {
-        const dtStr = updated.datetime instanceof Date ? updated.datetime.toISOString() : new Date(updated.datetime).toISOString();
-        const {error} = await supabase.from("ais_points")
-          .update({tipo_servicio:updated.tipo_servicio,zona_servicio:updated.zona_servicio,servicio_num:updated.servicio_num})
-          .eq("trip_id",ct.supabaseId).eq("datetime",dtStr);
-        if (error) throw error;
-        await supabase.from("ais_trips").update({n_services:newTrips[tripIdx].nServices}).eq("id",ct.supabaseId);
-      }
+      const dtStr = updated.datetime instanceof Date
+        ? updated.datetime.toISOString()
+        : new Date(updated.datetime).toISOString();
+
+      const { error: errPt } = await supabase
+        .from("ais_points")
+        .update({
+          tipo_servicio: updated.tipo_servicio,
+          zona_servicio: updated.zona_servicio,
+          servicio_num:  updated.servicio_num,
+        })
+        .eq("trip_id", ct.supabaseId)
+        .eq("datetime", dtStr);
+      if (errPt) throw errPt;
+
+      const { error: errTrip } = await supabase
+        .from("ais_trips")
+        .update({ n_services: newTrips[tripIdx].nServices })
+        .eq("id", ct.supabaseId);
+      if (errTrip) throw errTrip;
+
       setSaveStatus("ok");
     } catch(e) {
-      console.error("[TripViewer] Error guardando:",e);
+      console.error("[TripViewer] Error guardando en Supabase:", e);
       setSaveStatus("error");
     } finally {
       setSaving(false);
-      setTimeout(()=>setSaveStatus(null),2500);
+      setTimeout(() => setSaveStatus(null), 2500);
     }
   }, [trips, tripIdx, editing, setTrips]);
 
@@ -663,9 +692,14 @@ function PointsList({ visible, points, selPt, setSelPt, setEditing }) {
                 <span style={{fontSize:8,color:"#A5B5CC",display:"block"}}>{fmtTimeUTC(p.datetime)} UTC</span>
               </span>
 
-              {/* SOG coloreado — UX-07: ancla si SOG=0 */}
-              <span style={{fontFamily:"var(--mono)",fontSize:10,textAlign:"right",color:p.sog===null?"#A5B5CC":p.sog>3?"#235C96":p.sog<=0.5?"#1E7A4A":"#854F0B"}}>
-                {p.sog===null?"—":p.sog===0?"⚓":p.sog!=null?`${Number(p.sog).toFixed(1)}`:"—"}
+              {/* SOG coloreado — UX-07: ancla si SOG=0, tooltip en SOG bajo */}
+              <span
+                style={{fontFamily:"var(--mono)",fontSize:10,textAlign:"right",color:p.sog===null?"#A5B5CC":p.sog>3?"#235C96":p.sog<=0.5?"#1E7A4A":"#854F0B"}}
+                title={p.sog!=null&&p.sog<=0.5?"Velocidad muy baja (SOG < 0.5 kn)":undefined}
+              >
+                {p.sog===null?"—":p.sog===0
+                  ?<span title="Velocidad muy baja (SOG < 0.5 kn)">⚓</span>
+                  :p.sog!=null?`${Number(p.sog).toFixed(1)}`:"—"}
                 {p.sog!==null&&p.sog!==0&&<span style={{fontSize:7}}>kn</span>}
               </span>
 
