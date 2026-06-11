@@ -742,8 +742,20 @@ function PointsList({ visible, points, selPt, setSelPt, setEditing }) {
   return (
     <>
       {visible.length===0&&(
-        <div style={{padding:"20px 12px",textAlign:"center",fontSize:11,color:"#A5B5CC"}}>
-          No hay puntos en este viaje.
+        <div style={{padding:"24px 16px",textAlign:"center"}}>
+          {points.length===0
+            /* MEJORA-03: viaje real sin datos AIS — explicar en lugar de dejar vacío */
+            ? <>
+                <div style={{fontSize:28,marginBottom:8,opacity:.4}}>⊘</div>
+                <div style={{fontSize:12,fontWeight:600,color:"#92400E",marginBottom:4}}>Sin datos AIS</div>
+                <div style={{fontSize:11,color:"#A5B5CC",lineHeight:1.6,maxWidth:220,margin:"0 auto"}}>
+                  Este viaje no tiene posiciones registradas. Puede ser un viaje detectado por
+                  cambio de estado en puerto sin transmisión AIS activa.
+                </div>
+              </>
+            /* filtro activo sin resultados */
+            : <div style={{fontSize:11,color:"#A5B5CC"}}>No hay puntos en este viaje.</div>
+          }
         </div>
       )}
       {visible.map((p, vi) => {
