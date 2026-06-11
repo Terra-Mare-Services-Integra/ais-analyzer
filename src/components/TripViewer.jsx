@@ -4,20 +4,58 @@ import "leaflet/dist/leaflet.css";
 import { ZONES, STATES, SERVICE_TYPES } from "../lib/ais_engine";
 import { supabase } from "../lib/supabase";
 
-// ─── HELPERS DE FECHA (UTC 24h) ───────────────────────────────────────────────
-const fmtDate = d => {
-  if (!d) return "—";
+// ─── TIMEZONE ────────────────────────────────────────────────────────────────
+// Offset del operador. Hardcodeado UTC-3 (Argentina / ART).
+// En el futuro puede venir de configuración de usuario.
+const TZ_OFFSET_HS = -3;
+const TZ_LABEL     = "ART";
+
+// Convierte un Date UTC al equivalente local del operador (sin cambiar el objeto).
+// Devuelve un Date que, leído con getUTC*, da la hora local correcta.
+function toLocal(d) {
+  if (!d) return null;
   const dt = d instanceof Date ? d : new Date(d);
-  if (isNaN(dt.getTime())) return "—";
-  return `${String(dt.getUTCDate()).padStart(2,"0")}/${String(dt.getUTCMonth()+1).padStart(2,"0")}/${String(dt.getUTCFullYear()).slice(-2)}`;
+  if (isNaN(dt.getTime())) return null;
+  return new Date(dt.getTime() + TZ_OFFSET_HS * 3600000);
+}
+
+// ─── HELPERS DE FECHA ────────────────────────────────────────────────────────
+// Todos los helpers leen con getUTC* sobre el objeto ya desplazado por toLocal().
+// Así la lógica de offset está en UN solo lugar.
+
+// Fecha local: "14/11/24"
+const fmtDate = d => {
+  const loc = toLocal(d);
+  if (!loc) return "—";
+  return `${String(loc.getUTCDate()).padStart(2,"0")}/${String(loc.getUTCMonth()+1).padStart(2,"0")}/${String(loc.getUTCFullYear()).slice(-2)}`;
 };
+
+// Hora local: "23:04"
 const fmtTime = d => {
+  const loc = toLocal(d);
+  if (!loc) return "—";
+  return `${String(loc.getUTCHours()).padStart(2,"0")}:${String(loc.getUTCMinutes()).padStart(2,"0")}`;
+};
+
+// Hora UTC pura: "02:04"
+const fmtTimeUTC = d => {
   if (!d) return "—";
   const dt = d instanceof Date ? d : new Date(d);
   if (isNaN(dt.getTime())) return "—";
   return `${String(dt.getUTCHours()).padStart(2,"0")}:${String(dt.getUTCMinutes()).padStart(2,"0")}`;
 };
-const fmtDatetime = d => d ? `${fmtDate(d)} ${fmtTime(d)} UTC` : "—";
+
+// Datetime completo para tooltips del mapa: "14/11/24 23:04 ART · 02:04 UTC"
+const fmtDatetime = d => {
+  if (!d) return "—";
+  return `${fmtDate(d)} ${fmtTime(d)} ${TZ_LABEL} · ${fmtTimeUTC(d)} UTC`;
+};
+
+// Rango de fechas para el header del viaje: "14/11/24 23:04 ART → 15/11/24 10:04 ART"
+const fmtRange = (start, end) => {
+  if (!start || !end) return "—";
+  return `${fmtDate(start)} ${fmtTime(start)} ${TZ_LABEL} → ${fmtDate(end)} ${fmtTime(end)} ${TZ_LABEL}`;
+};
 
 // UX-15: duración legible "4d 15h" en vez de solo "h"
 function fmtDuration(hs) {
@@ -84,7 +122,9 @@ function ServiceEditor({ point, onSave, onClose, maxSvcNum }) {
         onClick={e=>e.stopPropagation()}>
         <div style={{fontSize:14,fontWeight:700,color:"#213363",marginBottom:2}}>Clasificar punto</div>
         <div style={{fontSize:10,color:"#6381A7",fontFamily:"var(--mono)",marginBottom:16}}>
-          {fmtDatetime(point.datetime)} · {sogDisplay} · {point.zone}
+          {fmtDate(point.datetime)} {fmtTime(point.datetime)} {TZ_LABEL}
+          <span style={{marginLeft:6,color:"#A5B5CC"}}>({fmtTimeUTC(point.datetime)} UTC)</span>
+          {" · "}{sogDisplay} · {point.zone}
         </div>
 
         <div style={{fontSize:10,fontWeight:600,color:"#6381A7",textTransform:"uppercase",letterSpacing:".8px",marginBottom:8}}>Número de servicio</div>
@@ -290,7 +330,7 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
         <span style={{fontFamily:"var(--mono)",fontSize:11,fontWeight:700,color:"#213363"}}>
           Viaje #{trip.id}
           {" — "}
-          {fmtDate(trip.dateStart)} {fmtTime(trip.dateStart)} → {fmtDate(trip.dateEnd)} {fmtTime(trip.dateEnd)} UTC
+          {fmtRange(trip.dateStart, trip.dateEnd)}
           {/* UX-15: duración explícita */}
           <span style={{marginLeft:6,fontSize:10,color:"#6381A7",fontWeight:400}}>({durLabel})</span>
           {trip.incomplete&&<span style={{marginLeft:8,fontSize:9,color:"#92400E",background:"#FEF3C7",padding:"1px 6px",borderRadius:3}}>⚠ Incompleto</span>}
@@ -361,8 +401,9 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
                   color={isSel?"#fff":col} weight={isSel?3:2} fillColor={col} fillOpacity={0.9}
                   eventHandlers={{click:()=>{setSelPt(i);setEditing({idx:i,pt:p});}}}>
                   <Popup>
-                    <div style={{fontSize:12,minWidth:180}}>
-                      <strong>{fmtDatetime(p.datetime)}</strong><br/>
+                    <div style={{fontSize:12,minWidth:190}}>
+                      <strong>{fmtDate(p.datetime)} {fmtTime(p.datetime)} {TZ_LABEL}</strong><br/>
+                      <span style={{fontSize:10,color:"#999"}}>{fmtTimeUTC(p.datetime)} UTC</span><br/>
                       SOG: {p.sog!=null?`${Number(p.sog).toFixed(1)} kn`:"—"} | {p.zone}<br/>
                       {STATES[p.state]?.label}
                       {p.servicio_num!=null&&p.tipo_servicio&&!["SIN_CLASIFICAR","BORRADO"].includes(p.tipo_servicio)&&(
@@ -379,10 +420,10 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
             {/* UX-12: marcadores inicio/fin con etiqueta S/F */}
             {points.length>0&&<>
               <CircleMarker center={[points[0].lat,points[0].lon]} radius={9} color="#fff" weight={3} fillColor="#213363" fillOpacity={1}>
-                <Popup><strong>S — Zarpe</strong><br/>{fmtDate(trip.dateStart)} {fmtTime(trip.dateStart)} UTC</Popup>
+                <Popup><strong>S — Zarpe</strong><br/>{fmtDate(trip.dateStart)} {fmtTime(trip.dateStart)} {TZ_LABEL}<br/><span style={{fontSize:10,color:"#999"}}>{fmtTimeUTC(trip.dateStart)} UTC</span></Popup>
               </CircleMarker>
               <CircleMarker center={[points[points.length-1].lat,points[points.length-1].lon]} radius={9} color="#fff" weight={3} fillColor={trip.incomplete?"#F59E0B":"#DC2626"} fillOpacity={1}>
-                <Popup><strong>{trip.incomplete?"⚠ Fin de datos":"F — Arribo"}</strong><br/>{fmtDate(trip.dateEnd)} {fmtTime(trip.dateEnd)} UTC</Popup>
+                <Popup><strong>{trip.incomplete?"⚠ Fin de datos":"F — Arribo"}</strong><br/>{fmtDate(trip.dateEnd)} {fmtTime(trip.dateEnd)} {TZ_LABEL}<br/><span style={{fontSize:10,color:"#999"}}>{fmtTimeUTC(trip.dateEnd)} UTC</span></Popup>
               </CircleMarker>
             </>}
           </MapContainer>
@@ -397,9 +438,10 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
               Viaje #{trip.id}
               {trip.incomplete&&<span style={{marginLeft:6,fontSize:9,background:"#FEF3C7",color:"#92400E",padding:"1px 5px",borderRadius:3}}>INCOMPLETO</span>}
             </div>
-            <div style={{fontSize:10,color:"#6381A7",fontFamily:"var(--mono)",marginTop:1,lineHeight:1.5}}>
-              {fmtDate(trip.dateStart)} {fmtTime(trip.dateStart)}<br/>
-              → {fmtDate(trip.dateEnd)} {fmtTime(trip.dateEnd)} UTC
+            <div style={{fontSize:10,color:"#6381A7",fontFamily:"var(--mono)",marginTop:1,lineHeight:1.6}}>
+              {fmtDate(trip.dateStart)} {fmtTime(trip.dateStart)} {TZ_LABEL}<br/>
+              → {fmtDate(trip.dateEnd)} {fmtTime(trip.dateEnd)} {TZ_LABEL}
+              <span style={{marginLeft:6,fontSize:8,color:"#A5B5CC"}}>({fmtTimeUTC(trip.dateStart)}–{fmtTimeUTC(trip.dateEnd)} UTC)</span>
             </div>
           </div>
 
@@ -557,7 +599,7 @@ function PointsList({ visible, points, selPt, setSelPt, setEditing }) {
         const col     = isWS?(p.servicio_num!=null?svcColor(p.servicio_num):"#9E9E9E"):(STATES[p.state]?.color||"#999");
         const isSel   = selPt===realIdx;
 
-        // UX-09: agrupar por fecha
+        // UX-09: agrupar por fecha LOCAL (ART), no UTC
         const thisDate = fmtDate(p.datetime);
         const showDate = thisDate!==lastDate;
         lastDate = thisDate;
@@ -581,8 +623,8 @@ function PointsList({ visible, points, selPt, setSelPt, setEditing }) {
           <div key={vi}>
             {/* UX-09: separador de fecha */}
             {showDate&&(
-              <div style={{padding:"3px 10px",background:"#F8FAFC",fontSize:8,color:"#A5B5CC",fontFamily:"var(--mono)",borderBottom:"1px solid #EEF2F7",borderTop:vi>0?"1px solid #EEF2F7":"none"}}>
-                {thisDate}
+              <div style={{padding:"3px 10px",background:"#F8FAFC",fontSize:8,color:"#6381A7",fontFamily:"var(--mono)",borderBottom:"1px solid #EEF2F7",borderTop:vi>0?"1px solid #EEF2F7":"none",display:"flex",justifyContent:"space-between"}}>
+                <span style={{fontWeight:600}}>{thisDate} {TZ_LABEL}</span>
               </div>
             )}
 
@@ -602,7 +644,7 @@ function PointsList({ visible, points, selPt, setSelPt, setEditing }) {
 
             <div role="button" tabIndex={0}
               style={{
-                display:"grid",gridTemplateColumns:"22px 46px 38px 1fr 16px",
+                display:"grid",gridTemplateColumns:"22px 54px 38px 1fr 16px",
                 gap:4,padding:"5px 10px",
                 borderBottom:"1px solid #F5F7FA",cursor:"pointer",alignItems:"center",
                 // UX-07: fondo amarillo en paradas
@@ -615,9 +657,10 @@ function PointsList({ visible, points, selPt, setSelPt, setEditing }) {
               {/* UX-10: número de fila */}
               <span style={{fontFamily:"var(--mono)",fontSize:8,color:"#C4CADC",textAlign:"center"}}>{realIdx+1}</span>
 
-              {/* UX-09: solo hora (fecha ya está en el separador) */}
-              <span style={{fontFamily:"var(--mono)",fontSize:10,color:"#6381A7",lineHeight:1.2}}>
-                {fmtTime(p.datetime)}
+              {/* Hora: ART principal + UTC secundario */}
+              <span style={{fontFamily:"var(--mono)",lineHeight:1.2}}>
+                <span style={{fontSize:10,color:"#213363",display:"block"}}>{fmtTime(p.datetime)}</span>
+                <span style={{fontSize:8,color:"#A5B5CC",display:"block"}}>{fmtTimeUTC(p.datetime)} UTC</span>
               </span>
 
               {/* SOG coloreado — UX-07: ancla si SOG=0 */}
