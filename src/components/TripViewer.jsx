@@ -353,6 +353,61 @@ function RenumberModal({ svcNums, onRenumber, onClose }) {
   );
 }
 
+// ─── RESUMEN ZC: construye filas de la tabla de resumen ─────────────────────
+// Recorre los puntos de ZONA_COMUN y los agrupa en:
+//   "entrada"  → primer bloque de puntos con SOG >= 4kn al inicio
+//   "cluster"  → bloque consecutivo de puntos con SOG < 4kn
+//   "transito" → puntos con SOG >= 4kn entre dos clusters
+//   "salida"   → último bloque de puntos con SOG >= 4kn al final
+function buildZcSummary(points) {
+  // Solo puntos de ZONA_COMUN, en orden
+  const zcPts = points
+    .map((p, i) => ({ ...p, _origIdx: i }))
+    .filter(p => p.zone === "ZONA_COMUN");
+
+  if (!zcPts.length) return [];
+
+  // Clasificar cada punto ZC como "fast" (SOG >= 4) o "slow" (SOG < 4)
+  const tagged = zcPts.map(p => ({
+    ...p,
+    fast: p.sog == null ? false : p.sog >= 4,
+  }));
+
+  // Construir segmentos contiguos por tipo (fast/slow)
+  const segs = [];
+  let cur = null;
+  for (const p of tagged) {
+    if (!cur || cur.fast !== p.fast) {
+      if (cur) segs.push(cur);
+      cur = { fast: p.fast, pts: [p] };
+    } else {
+      cur.pts.push(p);
+    }
+  }
+  if (cur) segs.push(cur);
+
+  // Clasificar segmentos en entrada/cluster/transito/salida
+  let clusterCount = 0;
+  const rows = [];
+  for (let si = 0; si < segs.length; si++) {
+    const seg = segs[si];
+    if (seg.fast) {
+      // Es "entrada" si es el primer segmento, "salida" si es el último, "tránsito" si está en el medio
+      const isFirst = si === 0;
+      const isLast  = si === segs.length - 1;
+      const type = isFirst ? "entrada" : isLast ? "salida" : "transito";
+      rows.push({ type, pts: seg.pts });
+    } else {
+      clusterCount++;
+      // Ver si el cluster tiene servicio asignado (todos los puntos con el mismo servicio_num)
+      const nums = [...new Set(seg.pts.map(p => p.servicio_num).filter(n => n != null))];
+      const svcNum = nums.length === 1 ? nums[0] : null;
+      rows.push({ type: "cluster", clusterN: clusterCount, svcNum, pts: seg.pts });
+    }
+  }
+  return rows;
+}
+
 // ─── COMPONENTE PRINCIPAL ─────────────────────────────────────────────────────
 export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
   const [tripIdx,        setTripIdx]        = useState(initialIdx);
@@ -360,6 +415,7 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
   const [editing,        setEditing]        = useState(null);
   const [editingCluster, setEditingCluster] = useState(null); // MEJORA-01
   const [renum,          setRenum]          = useState(false);    // MEJORA-07
+  const [zcOpen,         setZcOpen]         = useState(true);     // Resumen ZC toggle
   const [filter,         setFilter]         = useState("ALL");
   const [saving,         setSaving]         = useState(false);
   const [saveStatus,     setSaveStatus]     = useState(null);
@@ -784,7 +840,7 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
             <div style={{fontSize:10,color:"#6381A7",fontFamily:"var(--mono)",marginTop:1,lineHeight:1.6}}>
               {fmtDate(trip.dateStart)} {fmtTime(trip.dateStart)} {TZ_LABEL}<br/>
               → {fmtDate(trip.dateEnd)} {fmtTime(trip.dateEnd)} {TZ_LABEL}
-              <span style={{marginLeft:6,fontSize:8,color:"#A5B5CC"}}>({fmtTimeUTC(trip.dateStart)} UTC → {fmtTimeUTC(trip.dateEnd)} UTC)</span>
+              <span style={{marginLeft:6,fontSize:8,color:"#A5B5CC"}}>({fmtTimeUTC(trip.dateStart)}–{fmtTimeUTC(trip.dateEnd)} UTC)</span>
             </div>
           </div>
 
@@ -857,6 +913,82 @@ export default function TripViewer({ trips, setTrips, initialIdx=0, onBack }) {
               })}
             </div>
           )}
+
+          {/* ── RESUMEN ZC ── */}
+          {zcPoints.length>0&&(()=>{
+            const zcRows = buildZcSummary(points);
+            if (!zcRows.length) return null;
+            return (
+              <div style={{borderBottom:"1px solid #EEF2F7",flexShrink:0}}>
+                {/* Header colapsable */}
+                <div
+                  style={{padding:"5px 12px",display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer",userSelect:"none"}}
+                  onClick={()=>setZcOpen(v=>!v)}
+                >
+                  <span style={{fontSize:9,fontWeight:600,color:"#6381A7",textTransform:"uppercase",letterSpacing:1,fontFamily:"var(--mono)"}}>
+                    Resumen ZC
+                  </span>
+                  <span style={{fontSize:9,color:"#A5B5CC"}}>{zcOpen?"▲":"▼"}</span>
+                </div>
+                {zcOpen&&(
+                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:9,fontFamily:"var(--mono)"}}>
+                    <thead>
+                      <tr style={{background:"#F8FAFC"}}>
+                        <th style={{padding:"3px 8px",textAlign:"left",color:"#6381A7",fontWeight:600,borderBottom:"1px solid #EEF2F7",width:36}}>Tipo</th>
+                        <th style={{padding:"3px 8px",textAlign:"left",color:"#6381A7",fontWeight:600,borderBottom:"1px solid #EEF2F7"}}>Puntos (ART)</th>
+                        <th style={{padding:"3px 8px",textAlign:"left",color:"#6381A7",fontWeight:600,borderBottom:"1px solid #EEF2F7",width:80}}>SOG</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {zcRows.map((row, ri) => {
+                        const isCluster  = row.type === "cluster";
+                        const isTransito = row.type === "transito";
+                        const isEntrada  = row.type === "entrada";
+                        const isSalida   = row.type === "salida";
+
+                        // Colores por tipo
+                        const bg   = isCluster  ? (row.svcNum!=null ? svcColor(row.svcNum) : "#213363")
+                                   : isTransito ? "#FFF7ED"
+                                   : "#F8FAFC";
+                        const fg   = isCluster  ? "#fff"
+                                   : isTransito ? "#92400E"
+                                   : "#9E9E9E";
+
+                        // Label de tipo
+                        const typeLabel = isEntrada  ? "Entrada"
+                                        : isSalida   ? "Salida"
+                                        : isTransito ? "Tráns."
+                                        : row.svcNum != null ? "S" + row.svcNum
+                                        : "C" + row.clusterN;
+
+                        // Puntos ART — mostrar horas separadas por ·
+                        const horasStr = row.pts.map(p => fmtTime(p.datetime)).join(" · ");
+
+                        // SOG — ⚓ para 0/null, 1 decimal para el resto
+                        const sogStr = row.pts.map(p =>
+                          p.sog == null || p.sog === 0 ? "⚓" : Number(p.sog).toFixed(1)
+                        ).join(" · ");
+
+                        return (
+                          <tr key={ri} style={{background:bg,borderBottom:"1px solid #EEF2F7"}}>
+                            <td style={{padding:"3px 8px",color:fg,fontWeight:isCluster?700:400,whiteSpace:"nowrap"}}>
+                              {typeLabel}
+                            </td>
+                            <td style={{padding:"3px 8px",color:fg,maxWidth:120,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                              {horasStr}
+                            </td>
+                            <td style={{padding:"3px 8px",color:fg,maxWidth:80,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                              {sogStr}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            );
+          })()}
 
           {/* Filtros */}
           <div style={{padding:"7px 12px",display:"flex",alignItems:"center",justifyContent:"space-between",borderBottom:"1px solid #EEF2F7",flexShrink:0}}>
@@ -1032,8 +1164,8 @@ function PointsList({ visible, points, selPt, setSelPt, setEditing }) {
                 background:isSel?(isWS?"#F0FFF4":"#EFF6FF"):isSlowStop?"#FFFDE7":"transparent",
                 borderLeft:isSel?`3px solid ${isWS?"#1E7A4A":"#235C96"}`:"3px solid transparent",
               }}
-              onClick={()=>{setSelPt(realIdx);if(isWS&&isZC)setEditing({idx:realIdx,pt:p});}}
-              onKeyDown={e=>{if(e.key==="Enter"||e.key===" "){setSelPt(realIdx);if(isWS&&isZC)setEditing({idx:realIdx,pt:p});}}}
+              onClick={()=>{setSelPt(realIdx);if(isWS)setEditing({idx:realIdx,pt:p});}}
+              onKeyDown={e=>{if(e.key==="Enter"||e.key===" "){setSelPt(realIdx);if(isWS)setEditing({idx:realIdx,pt:p});}}}
             >
               <span style={{fontFamily:"var(--mono)",fontSize:8,color:"#C4CADC",textAlign:"center"}}>{realIdx+1}</span>
 
@@ -1056,7 +1188,7 @@ function PointsList({ visible, points, selPt, setSelPt, setEditing }) {
                 <span style={{fontSize:8,padding:"2px 4px",borderRadius:3,background:`${col}18`,color:col,border:`1px solid ${col}44`,fontFamily:"var(--mono)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>
                   {p.servicio_num!=null
                     ?`S${p.servicio_num}${p.tipo_servicio&&!["SIN_CLASIFICAR","BORRADO"].includes(p.tipo_servicio)?` · ${SERVICE_TYPES[p.tipo_servicio]?.label||""}`:""}`
-                    :(p.state==="WORKING_STOP"&&p.sog!=null&&p.sog>=4?"Navegando":STATES[p.state]?.label||p.state)}
+                    :(STATES[p.state]?.label||p.state)}
                 </span>
                 {isZC&&<span style={{fontSize:7,padding:"1px 3px",borderRadius:2,background:"#DBEAFE",color:"#1E40AF",fontFamily:"var(--mono)",flexShrink:0}}>ZC</span>}
               </span>
