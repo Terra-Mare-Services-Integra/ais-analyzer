@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef, useMemo } from "react";
+import React, { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { MapContainer, TileLayer, Polyline, Polygon, CircleMarker, Popup, useMap } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 import { ZONES, SERVICE_TYPES } from "../lib/ais_engine";
@@ -253,95 +253,214 @@ function LabelSelector({ point, onSave, onClose, maxSvcNum }) {
   );
 }
 
-// ─── TABLA DE CLUSTERS ───────────────────────────────────────────────────────
-function ClusterTable({ clusters, onRowClick, highlightNum, onTipoChange }) {
-  if (!clusters.length) {
+// ─── SEQUENCE TABLE ──────────────────────────────────────────────────────────
+// Agrupa puntos consecutivos con la misma etiqueta en "segmentos".
+// Una fila por segmento. Horas y SOGs de todos los puntos del segmento
+// se muestran en la misma celda, separados por " / ", wrapeando si no entran.
+// Los clusters tienen dropdown de tipo de servicio inline.
+
+function buildSegments(points, clusters) {
+  // Set de índices que pertenecen a algún cluster, mapeado a su número
+  const clusterNumByIdx = {};
+  clusters.forEach(c => {
+    c.points.forEach(cp => {
+      const idx = points.indexOf(cp);
+      if (idx !== -1) clusterNumByIdx[idx] = c.num;
+    });
+  });
+
+  const segments = [];
+  let i = 0;
+  while (i < points.length) {
+    const p = points[i];
+    const cNum = clusterNumByIdx[i];
+
+    if (cNum != null) {
+      // Reunir todos los puntos consecutivos de este mismo cluster
+      const pts = [];
+      while (i < points.length && clusterNumByIdx[i] === cNum) {
+        pts.push({ point: points[i], idx: i });
+        i++;
+      }
+      segments.push({ type: "cluster", clusterNum: cNum, items: pts });
+    } else {
+      // Punto normal: agrupar consecutivos con el mismo state
+      const label = p.state ?? "__none__";
+      const pts   = [];
+      while (i < points.length && clusterNumByIdx[i] == null && (points[i].state ?? "__none__") === label) {
+        pts.push({ point: points[i], idx: i });
+        i++;
+      }
+      segments.push({ type: "point", label, items: pts });
+    }
+  }
+  return segments;
+}
+
+const LABEL_META_SEQ = {
+  ZARPE:        { icon: "⚓", text: "Zarpe",       color: "#213363" },
+  LLEGADA:      { icon: "🏁", text: "Llegada",     color: "#DC2626" },
+  ENTRADA_ZONA: { icon: "→",  text: "Entrada ZC",  color: "#1E40AF" },
+  SALIDA_ZONA:  { icon: "←",  text: "Salida ZC",   color: "#1E40AF" },
+  TRANSITO:     { icon: "▶",  text: "Tránsito",    color: "#64B5F6" },
+};
+
+function SequenceTable({ points, clusters, onClusterClick, highlightNum, onTipoChange, onLabelClick }) {
+  if (!points.length) {
     return (
       <div style={{padding:"24px 16px",textAlign:"center"}}>
         <div style={{fontSize:28,opacity:.3,marginBottom:8}}>⊘</div>
         <div style={{fontSize:11,color:"#6381A7"}}>
-          No hay clusters detectados.<br/>
-          <span style={{fontSize:10,color:"#A5B5CC"}}>
-            Usá "Auto-detectar" para generar clusters automáticamente.
-          </span>
+          Sin datos AIS. Usá "Auto-detectar" o asigná etiquetas manualmente.
         </div>
       </div>
     );
   }
 
+  const segments  = buildSegments(points, clusters);
+  const clusterMap = {};
+  clusters.forEach(c => { clusterMap[c.num] = c; });
+
+  // Column widths (px) — fixed layout
+  const COL = { hora: "30%", etiqueta: "18%", sog: "22%", tipo: "30%" };
+
+  const cellBase = {
+    padding: "6px 8px",
+    verticalAlign: "top",
+    textAlign: "center",
+    borderRight: "1px solid #EEF2F7",
+    lineHeight: 1.6,
+  };
+
+  const dividerRow = (key) => (
+    <tr key={key}>
+      <td colSpan={4} style={{padding:0,borderTop:"1px solid #E2E8F0"}}/>
+    </tr>
+  );
+
+  const rows = [];
+  segments.forEach((seg, si) => {
+    if (si > 0) rows.push(dividerRow(`div-${si}`));
+
+    if (seg.type === "cluster") {
+      const c     = clusterMap[seg.clusterNum];
+      if (!c) return;
+      const isHL  = highlightNum === c.num;
+      const noSvc = !c.tipoServicio;
+      const col   = svcColor(c.num);
+
+      const horas   = seg.items.map(({point:p}) => fmtTime(p.datetime));
+      const sogs    = seg.items.map(({point:p}) =>
+        p.sog == null ? "—" : p.sog === 0 ? "⚓" : `${Number(p.sog).toFixed(1)}kn`
+      );
+
+      rows.push(
+        <tr key={`seg-${si}`}
+          onClick={() => onClusterClick(c)}
+          style={{
+            background: isHL ? `${col}18` : noSvc ? "#FFFBEB" : `${col}0C`,
+            cursor: "pointer",
+            borderLeft: `3px solid ${col}`,
+          }}>
+          {/* HORA */}
+          <td style={{...cellBase, width: COL.hora, fontFamily:"var(--mono)", fontSize:10, color:"#213363", borderLeft:"none"}}>
+            {horas.join(" / ")}
+          </td>
+          {/* ETIQUETA */}
+          <td style={{...cellBase, width: COL.etiqueta, fontFamily:"var(--mono)", fontWeight:800, fontSize:12, color:col}}>
+            ● C{c.num}
+          </td>
+          {/* SOG */}
+          <td style={{...cellBase, width: COL.sog, fontFamily:"var(--mono)", fontSize:10, color:"#1E7A4A"}}>
+            {sogs.join(" / ")}
+          </td>
+          {/* TIPO */}
+          <td style={{...cellBase, width: COL.tipo, borderRight:"none", padding:"4px 6px"}}
+            onClick={e => e.stopPropagation()}>
+            <select
+              value={c.tipoServicio ?? ""}
+              onChange={e => onTipoChange(c.num, e.target.value || null)}
+              style={{
+                fontSize:10, padding:"3px 4px", borderRadius:5, width:"100%",
+                border:`1px solid ${noSvc ? "#FCD34D" : col+"55"}`,
+                background: noSvc ? "#FFFBEB" : `${col}10`,
+                color: noSvc ? "#92400E" : "#213363",
+                fontFamily:"var(--sans)", cursor:"pointer", outline:"none",
+              }}>
+              <option value="">— Tipo —</option>
+              {TIPOS_SERVICIO.map(t=>(
+                <option key={t.key} value={t.key}>{t.label}</option>
+              ))}
+            </select>
+          </td>
+        </tr>
+      );
+      return;
+    }
+
+    // ── POINT segment ────────────────────────────────────────────────
+    const meta    = LABEL_META_SEQ[seg.label];
+    const col     = meta ? meta.color : "#9E9E9E";
+    const hasLbl  = !!meta;
+
+    const horas   = seg.items.map(({point:p}) => fmtTime(p.datetime));
+    const sogs    = seg.items.map(({point:p}) =>
+      p.sog == null ? "—" : p.sog === 0 ? "⚓" : `${Number(p.sog).toFixed(1)}kn`
+    );
+
+    // Edit button — only show for single-point segments with a label
+    const canEdit = seg.items.length === 1;
+
+    rows.push(
+      <tr key={`seg-${si}`}
+        style={{
+          background: hasLbl ? `${col}07` : "#fff",
+          borderLeft: `3px solid ${hasLbl ? col : "#EEF2F7"}`,
+        }}>
+        {/* HORA */}
+        <td style={{...cellBase, width: COL.hora, fontFamily:"var(--mono)", fontSize:10, color:"#213363", borderLeft:"none"}}>
+          {horas.join(" / ")}
+        </td>
+        {/* ETIQUETA */}
+        <td style={{...cellBase, width: COL.etiqueta, fontWeight:700, fontSize:10, color:col}}>
+          {meta ? `${meta.icon} ${meta.text}` : <span style={{color:"#C4CADC",fontStyle:"italic",fontSize:9}}>sin etiqueta</span>}
+        </td>
+        {/* SOG */}
+        <td style={{...cellBase, width: COL.sog, fontFamily:"var(--mono)", fontSize:10,
+                    color: seg.items[0]?.point?.sog > 3 ? "#235C96" : "#1E7A4A"}}>
+          {sogs.join(" / ")}
+        </td>
+        {/* TIPO — vacío para no-cluster, con ✏ si es editable */}
+        <td style={{...cellBase, width: COL.tipo, borderRight:"none", color:"#D6E0ED", fontSize:10}}>
+          {canEdit && (
+            <span title="Editar etiqueta" style={{cursor:"pointer", transition:"color .1s"}}
+              onClick={() => onLabelClick(seg.items[0].idx, seg.items[0].point)}
+              onMouseEnter={e=>e.currentTarget.style.color="#235C96"}
+              onMouseLeave={e=>e.currentTarget.style.color="#D6E0ED"}>✏</span>
+          )}
+        </td>
+      </tr>
+    );
+  });
+
   return (
-    <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+    <table style={{width:"100%", borderCollapse:"collapse", fontSize:11, tableLayout:"fixed"}}>
       <thead>
-        <tr style={{background:"#F8FAFC",borderBottom:"2px solid #D6E0ED"}}>
-          <th style={TH}>#</th>
-          <th style={TH}>Inicio</th>
-          <th style={TH}>Fin</th>
-          <th style={TH}>Pts</th>
-          <th style={TH}>SOG Ø</th>
-          <th style={{...TH,minWidth:140}}>Tipo de servicio</th>
+        <tr style={{background:"#F8FAFC", borderBottom:"2px solid #D6E0ED", position:"sticky", top:0, zIndex:1}}>
+          <th style={{...TH, width:COL.hora,     textAlign:"center", borderRight:"1px solid #EEF2F7"}}>Hora</th>
+          <th style={{...TH, width:COL.etiqueta, textAlign:"center", borderRight:"1px solid #EEF2F7"}}>Etiqueta</th>
+          <th style={{...TH, width:COL.sog,      textAlign:"center", borderRight:"1px solid #EEF2F7"}}>SOG</th>
+          <th style={{...TH, width:COL.tipo,     textAlign:"center"}}>Tipo</th>
         </tr>
       </thead>
       <tbody>
-        {clusters.map(c => {
-          const isHL  = highlightNum === c.num;
-          const noSvc = !c.tipoServicio;
-          const col   = svcColor(c.num);
-          const sogAvg = c.points.length
-            ? (c.points.reduce((s,p)=>s+(p.sog??0),0)/c.points.length).toFixed(1)
-            : "—";
-          return (
-            <tr key={c.num}
-              onClick={()=>onRowClick(c)}
-              style={{
-                background: isHL ? `${col}18` : noSvc ? "#FFFBEB" : "#fff",
-                borderBottom: "1px solid #EEF2F7",
-                borderLeft: `3px solid ${isHL ? col : noSvc ? "#FCD34D" : "transparent"}`,
-                cursor:"pointer",
-                transition:"background .12s",
-              }}>
-              <td style={TD}>
-                <span style={{fontFamily:"var(--mono)",fontWeight:700,
-                              color:col,fontSize:12}}>
-                  C{c.num}
-                </span>
-              </td>
-              <td style={{...TD,fontFamily:"var(--mono)",fontSize:10}}>
-                {fmtTime(c.points[0]?.datetime)}
-              </td>
-              <td style={{...TD,fontFamily:"var(--mono)",fontSize:10}}>
-                {fmtTime(c.points[c.points.length-1]?.datetime)}
-              </td>
-              <td style={{...TD,fontFamily:"var(--mono)",textAlign:"center"}}>
-                {c.points.length}
-              </td>
-              <td style={{...TD,fontFamily:"var(--mono)",textAlign:"center",
-                          color:parseFloat(sogAvg)>3?"#235C96":"#1E7A4A"}}>
-                {sogAvg}kn
-              </td>
-              <td style={TD} onClick={e=>e.stopPropagation()}>
-                <select
-                  value={c.tipoServicio ?? ""}
-                  onChange={e=>onTipoChange(c.num, e.target.value || null)}
-                  style={{
-                    fontSize:10,padding:"4px 6px",borderRadius:5,width:"100%",
-                    border:`1px solid ${noSvc?"#FCD34D":"#D6E0ED"}`,
-                    background: noSvc ? "#FFFBEB" : "#fff",
-                    color: noSvc ? "#92400E" : "#213363",
-                    fontFamily:"var(--sans)",cursor:"pointer",outline:"none",
-                  }}>
-                  <option value="">— Elegir tipo —</option>
-                  {TIPOS_SERVICIO.map(t=>(
-                    <option key={t.key} value={t.key}>{t.label}</option>
-                  ))}
-                </select>
-              </td>
-            </tr>
-          );
-        })}
+        {rows}
       </tbody>
     </table>
   );
 }
+
+
 const TH = {padding:"7px 10px",textAlign:"left",fontSize:9,color:"#6381A7",
             fontWeight:600,textTransform:"uppercase",letterSpacing:".6px",
             fontFamily:"var(--mono)",whiteSpace:"nowrap"};
@@ -610,14 +729,14 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
   }, [trips, tripIdx, setTrips]);
 
   // ─── AUTO-DETECTAR ────────────────────────────────────────────────────────────
-  // Lógica:
-  //   - Solo puntos en ZONA_COMUN
-  //   - SOG < 4 → candidato a cluster
-  //   - Gap > 90 min entre candidatos consecutivos → nuevo cluster
-  //   - Primer punto de zona → ENTRADA_ZONA
-  //   - Último punto de zona → SALIDA_ZONA
-  //   - SOG >= 4 dentro de zona → TRANSITO
-  //   - Fuera de zona pero sin etiqueta especial → null (estado original)
+  // Asigna etiqueta a CADA punto del viaje:
+  //   - Primer punto global → ZARPE
+  //   - Último punto global → LLEGADA
+  //   - ZONA_COMUN, SOG < 4 → candidato a cluster (agrupados por gap > 90 min)
+  //   - ZONA_COMUN, SOG >= 4 → TRANSITO
+  //   - Primer punto de ZC → ENTRADA_ZONA (si no es cluster)
+  //   - Último punto de ZC → SALIDA_ZONA (si no es cluster)
+  //   - Resto (fuera de zona, navegando) → TRANSITO
   const handleAutoDetect = useCallback(async () => {
     const ct = trips[tripIdx];
     if (!ct) return;
@@ -628,8 +747,35 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
         .map((p, i) => ({ p, i }))
         .filter(({ p }) => p.zone === "ZONA_COMUN");
 
+      // Si no hay ZC igual etiquetamos ZARPE / TRANSITO / LLEGADA
       if (!zcPts.length) {
-        showToast("No hay puntos en ZONA_COMUN", "info");
+        const newPoints = ct.points.map((p, i) => ({
+          ...p,
+          state: i === 0 ? "ZARPE" : i === ct.points.length - 1 ? "LLEGADA" : "TRANSITO",
+          servicio_num: null,
+        }));
+        const newTrips = trips.map((t, ti) =>
+          ti === tripIdx ? { ...t, points: newPoints, nServices: 0 } : t
+        );
+        setTrips(newTrips);
+        if (ct.supabaseId) {
+          // batch: ZARPE, TRANSITO, LLEGADA
+          const groups = { ZARPE:[], TRANSITO:[], LLEGADA:[] };
+          newPoints.forEach(p => {
+            const st = p.state;
+            if (groups[st]) groups[st].push(
+              p.datetime instanceof Date ? p.datetime.toISOString() : new Date(p.datetime).toISOString()
+            );
+          });
+          for (const [state, dts] of Object.entries(groups)) {
+            if (!dts.length) continue;
+            const { error } = await supabase.from("ais_points")
+              .update({ state, servicio_num: null })
+              .eq("trip_id", ct.supabaseId).in("datetime", dts);
+            if (error) throw error;
+          }
+        }
+        showToast("0 clusters — ZARPE / TRÁNSITO / LLEGADA asignados", "ok");
         return;
       }
 
@@ -657,11 +803,18 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
       // Paso 2: construir mapa de índice → nueva asignación
       const updates = {}; // origIdx → {state, servicio_num}
 
-      // Marcar clusters
+      // Marcar clusters: incluir TODOS los puntos de ZC entre el primer y último
+      // candidato del grupo (no solo los de SOG < 4 — los puntos con SOG nulo
+      // o cualquier punto intermedio en el rango temporal también son del cluster).
       clusterGroups.forEach((grp, gi) => {
-        grp.forEach(({ i }) => {
-          updates[i] = { state: null, servicio_num: gi + 1 };
-        });
+        const minOrigIdx = Math.min(...grp.map(({ i }) => i));
+        const maxOrigIdx = Math.max(...grp.map(({ i }) => i));
+        // Todos los puntos ZC dentro de [minOrigIdx, maxOrigIdx] pertenecen al cluster
+        zcPts
+          .filter(({ i }) => i >= minOrigIdx && i <= maxOrigIdx)
+          .forEach(({ i }) => {
+            updates[i] = { state: null, servicio_num: gi + 1 };
+          });
       });
 
       // Marcar tránsito (ZONA_COMUN, SOG >= 4, no en ningún cluster)
@@ -687,6 +840,20 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
           updates[lastIdx] = { state: "SALIDA_ZONA", servicio_num: null };
         }
       }
+
+      // Paso 2b: etiquetar TODOS los puntos restantes (fuera de ZC)
+      //   - índice 0 → ZARPE (override todo)
+      //   - índice last → LLEGADA (override todo)
+      //   - resto sin etiqueta → TRANSITO
+      ct.points.forEach((p, i) => {
+        if (i === 0) {
+          updates[i] = { state: "ZARPE", servicio_num: null };
+        } else if (i === ct.points.length - 1) {
+          updates[i] = { state: "LLEGADA", servicio_num: null };
+        } else if (!updates[i]) {
+          updates[i] = { state: "TRANSITO", servicio_num: null };
+        }
+      });
 
       // Paso 3: aplicar localmente
       const newPoints = ct.points.map((p, i) => {
@@ -988,14 +1155,16 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
 
           {/* Tabla scrolleable */}
           <div style={{flex:1,overflowY:"auto",overflowX:"auto"}}>
-            <ClusterTable
+            <SequenceTable
+              points={points}
               clusters={clusters}
               highlightNum={highlightNum}
-              onRowClick={c => {
+              onClusterClick={c => {
                 setHighlightNum(c.num);
                 setZoomTarget([...c.points]);
               }}
               onTipoChange={handleTipoChange}
+              onLabelClick={(idx, pt) => setLabelEditing({idx, pt})}
             />
           </div>
 
