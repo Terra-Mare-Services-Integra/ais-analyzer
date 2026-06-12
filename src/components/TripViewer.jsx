@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { MapContainer, TileLayer, Polyline, Polygon, CircleMarker, Popup, useMap } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
-import { ZONES, SERVICE_TYPES } from "../lib/ais_engine";
+import { ZONES, SERVICE_TYPES, haversine } from "../lib/ais_engine";
 import { supabase } from "../lib/supabase";
 
 // ─── TIMEZONE ────────────────────────────────────────────────────────────────
@@ -779,7 +779,15 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
         return;
       }
 
-      // Paso 1: agrupar candidatos en clusters (SOG < 4, gap max 90 min)
+      // Paso 1: agrupar candidatos en clusters.
+      // Criterio de corte (cualquiera rompe el cluster):
+      //   (A) Gap temporal > 90 min entre candidatos consecutivos
+      //   (B) Distancia > 2nm entre candidatos consecutivos de baja SOG
+      // Esto evita que dos servicios a buques distintos (sin punto de tránsito
+      // capturado entre ellos) queden fusionados en un solo cluster.
+      const CLUSTER_MAX_GAP_MIN  = 90;   // minutos
+      const CLUSTER_MAX_DIST_NM  = 2.0;  // millas náuticas
+
       const candidatos = zcPts.filter(({ p }) => p.sog != null && p.sog < 4);
 
       const clusterGroups = [];
@@ -788,9 +796,14 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
         if (!curGroup) {
           curGroup = [item];
         } else {
-          const last = curGroup[curGroup.length - 1];
-          const gapMin = (new Date(item.p.datetime) - new Date(last.p.datetime)) / 60000;
-          if (gapMin > 90) {
+          const last    = curGroup[curGroup.length - 1];
+          const gapMin  = (new Date(item.p.datetime) - new Date(last.p.datetime)) / 60000;
+          const distNm  = (last.p.lat != null && last.p.lon != null &&
+                           item.p.lat != null && item.p.lon != null)
+            ? haversine(last.p.lat, last.p.lon, item.p.lat, item.p.lon)
+            : 0;
+
+          if (gapMin > CLUSTER_MAX_GAP_MIN || distNm > CLUSTER_MAX_DIST_NM) {
             clusterGroups.push(curGroup);
             curGroup = [item];
           } else {
