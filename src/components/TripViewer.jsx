@@ -63,8 +63,21 @@ const LABEL_META = {
 const MANUAL_LABELS = ["ZARPE","LLEGADA","ENTRADA_ZONA","SALIDA_ZONA","TRANSITO"];
 
 // Color para etiqueta de un punto (incluye C1/C2/C3...)
-const SVC_COLORS = ["#2196F3","#FF9800","#9C27B0","#4CAF50","#F44336","#00BCD4","#FF5722","#E91E63"];
-const svcColor   = n => n != null ? SVC_COLORS[(n - 1) % SVC_COLORS.length] : "#9E9E9E";
+const SVC_COLORS = [
+  "#2196F3", // C1  azul
+  "#FF9800", // C2  naranja
+  "#E91E63", // C3  rosa
+  "#4CAF50", // C4  verde
+  "#9C27B0", // C5  violeta
+  "#F44336", // C6  rojo
+  "#00BCD4", // C7  cyan
+  "#FF5722", // C8  naranja oscuro
+  "#3F51B5", // C9  índigo
+  "#8BC34A", // C10 verde claro
+  "#FFC107", // C11 amarillo
+  "#009688", // C12 teal
+];
+const svcColor = n => n != null ? SVC_COLORS[(n - 1) % SVC_COLORS.length] : "#9E9E9E";
 
 function pointColor(p) {
   if (p?.servicio_num != null) return svcColor(p.servicio_num);
@@ -782,13 +795,23 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
       // Paso 1: agrupar candidatos en clusters.
       // Criterio de corte (cualquiera rompe el cluster):
       //   (A) Gap temporal > 90 min entre candidatos consecutivos
-      //   (B) Distancia > 2nm entre candidatos consecutivos de baja SOG
-      // Esto evita que dos servicios a buques distintos (sin punto de tránsito
-      // capturado entre ellos) queden fusionados en un solo cluster.
-      const CLUSTER_MAX_GAP_MIN  = 90;   // minutos
-      const CLUSTER_MAX_DIST_NM  = 2.0;  // millas náuticas
+      //   (B) Distancia del nuevo punto al CENTROIDE del cluster activo > 0.5nm
+      //       (centroide = promedio lat/lon de todos los puntos del grupo actual)
+      //       Esto detecta que el barco se movió a otro buque aunque no haya
+      //       quedado registrado ningún punto de tránsito entre mediciones.
+      const CLUSTER_MAX_GAP_MIN    = 90;   // minutos
+      const CLUSTER_MAX_DIST_NM    = 0.5;  // millas náuticas al centroide
 
       const candidatos = zcPts.filter(({ p }) => p.sog != null && p.sog < 4);
+
+      // Calcula centroide (lat/lon promedio) de un grupo de items
+      const centroid = grp => {
+        const valid = grp.filter(({ p }) => p.lat != null && p.lon != null);
+        if (!valid.length) return null;
+        const lat = valid.reduce((s, { p }) => s + p.lat, 0) / valid.length;
+        const lon = valid.reduce((s, { p }) => s + p.lon, 0) / valid.length;
+        return { lat, lon };
+      };
 
       const clusterGroups = [];
       let curGroup = null;
@@ -798,9 +821,11 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
         } else {
           const last    = curGroup[curGroup.length - 1];
           const gapMin  = (new Date(item.p.datetime) - new Date(last.p.datetime)) / 60000;
-          const distNm  = (last.p.lat != null && last.p.lon != null &&
-                           item.p.lat != null && item.p.lon != null)
-            ? haversine(last.p.lat, last.p.lon, item.p.lat, item.p.lon)
+
+          // Distancia al centroide del cluster actual
+          const ctr     = centroid(curGroup);
+          const distNm  = (ctr && item.p.lat != null && item.p.lon != null)
+            ? haversine(ctr.lat, ctr.lon, item.p.lat, item.p.lon)
             : 0;
 
           if (gapMin > CLUSTER_MAX_GAP_MIN || distNm > CLUSTER_MAX_DIST_NM) {
