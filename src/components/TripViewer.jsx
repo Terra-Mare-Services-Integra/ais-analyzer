@@ -52,38 +52,40 @@ function fmtDuration(hs) {
 // C1/C2/C3... se derivan de servicio_num (no se almacenan como strings).
 const LABEL_META = {
   ZARPE:        { label: "Zarpe",        color: "#213363", icon: "⚓" },
-  LLEGADA:      { label: "Llegada",      color: "#1a3a6c", icon: "🏁" },
+  LLEGADA:      { label: "Llegada",      color: "#DC2626", icon: "🏁" },
   ENTRADA_ZONA: { label: "Entrada Zona", color: "#1E40AF", icon: "→" },
   SALIDA_ZONA:  { label: "Salida Zona",  color: "#1E40AF", icon: "←" },
   TRANSITO:     { label: "Tránsito",     color: "#64B5F6", icon: "▶" },
-  CLUSTER:      { label: "Cluster",      color: "#22C55E", icon: "●" }, // fallback
+  // NOTA: los puntos de cluster NO tienen state — se identifican por servicio_num.
+  // pointColor() prioriza servicio_num sobre state, así que nunca llega acá.
 };
 
 // Etiquetas asignables manualmente
 const MANUAL_LABELS = ["ZARPE","LLEGADA","ENTRADA_ZONA","SALIDA_ZONA","TRANSITO"];
 
 // Color para etiqueta de un punto (incluye C1/C2/C3...)
-// Paleta de clusters — 10 colores separados ~72° en el círculo cromático.
-// Ronda 1 (saturados, valor alto):  0° 72° 144° 216° 288°
-// Ronda 2 (mismos matices, oscuros): evita confusión con ronda 1 por brillo
-// Colores reservados del sistema excluidos:
-//   #213363 navy · #64B5F6 tránsito · #DC2626 llegada · #E91E63 zona común
+// Paleta de clusters — alternancia cálido/frío + oscuro/claro para máximo
+// contraste visual entre clusters CONSECUTIVOS en tabla y mapa.
+// Regla: nunca dos colores adyacentes del mismo matiz ni luminosidad similar.
+// Colores del sistema excluidos: #213363 navy, #64B5F6 tránsito, #DC2626 llegada, #E91E63 zona
 const SVC_COLORS = [
-  "#E53935", // C1  rojo           (0°,  saturado)
-  "#43A047", // C2  verde          (72°, saturado)
-  "#00ACC1", // C3  cyan           (144°,saturado)
-  "#1E88E5", // C4  azul           (216°,saturado)
-  "#8E24AA", // C5  violeta        (288°,saturado)
-  "#F57F17", // C6  amarillo ocre  (0°+36°, cálido oscuro — distinto de C1 rojo)
-  "#2E7D32", // C7  verde oscuro   (72°, oscuro)
-  "#00695C", // C8  teal oscuro    (144°,oscuro)
-  "#1565C0", // C9  azul oscuro    (216°,oscuro)
-  "#6A1B9A", // C10 violeta oscuro (288°,oscuro)
+  "#D32F2F", // C1  rojo oscuro       (cálido, oscuro)
+  "#00BCD4", // C2  cyan brillante    (frío,   claro)
+  "#F57F17", // C3  naranja oscuro    (cálido, oscuro)
+  "#43A047", // C4  verde medio       (frío,   medio)
+  "#FDD835", // C5  amarillo vivo     (cálido, muy claro)
+  "#1565C0", // C6  azul oscuro       (frío,   oscuro)
+  "#AD1457", // C7  bordo/fucsia      (cálido, oscuro)
+  "#00897B", // C8  teal medio        (frío,   medio)
+  "#E64A19", // C9  naranja rojo      (cálido, medio)
+  "#5E35B1", // C10 violeta medio     (frío,   oscuro)
 ];
 const svcColor = n => n != null ? SVC_COLORS[(n - 1) % SVC_COLORS.length] : "#9E9E9E";
 
 function pointColor(p) {
+  // servicio_num SIEMPRE tiene prioridad — define el color del cluster
   if (p?.servicio_num != null) return svcColor(p.servicio_num);
+  // state solo para puntos de navegación (ZARPE, TRANSITO, etc.)
   if (p?.state && LABEL_META[p.state]) return LABEL_META[p.state].color;
   return "#9E9E9E";
 }
