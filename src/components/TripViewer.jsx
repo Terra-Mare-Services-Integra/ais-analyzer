@@ -1239,7 +1239,7 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
                 // - cluster normal: 8px, color del cluster
                 // - con etiqueta (tránsito etc): 5px
                 // - sin etiqueta: 3px gris
-                const radius = isHL ? 11 : isSel ? 9 : isCluster ? 8 : 5;
+                const radius = isSel ? 9 : isCluster ? 8 : 5;
 
                 const hasLabel = p.state != null || p.servicio_num != null;
                 if (!hasLabel && !isSel) {
@@ -1275,24 +1275,14 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
                 );
 
                 return (
-                  <React.Fragment key={i}>
-                    {/* Halo exterior para puntos del cluster highlighteado */}
-                    {isHL && (
-                      <CircleMarker center={[p.lat,p.lon]} radius={radius + 6}
-                        color={col} weight={2} fillColor={col} fillOpacity={0.15}
-                        interactive={false}
-                      />
-                    )}
-                    {/* Marcador principal */}
-                    <CircleMarker center={[p.lat,p.lon]} radius={radius}
-                      color={isHL ? "#fff" : isSel ? "#fff" : isCluster ? "#fff" : col}
-                      weight={isHL ? 3 : isSel ? 3 : isCluster ? 2 : 1.5}
-                      fillColor={col}
-                      fillOpacity={isHL ? 1 : isSel ? 1 : isCluster ? 0.95 : 0.8}
-                      eventHandlers={{click:()=>{setSelPt(i);setLabelEditing({idx:i,pt:p});}}}>
-                      {popup}
-                    </CircleMarker>
-                  </React.Fragment>
+                  <CircleMarker key={i} center={[p.lat,p.lon]} radius={radius}
+                    color={isSel ? "#fff" : isCluster ? "#fff" : col}
+                    weight={isSel ? 3 : isCluster ? 2 : 1.5}
+                    fillColor={col}
+                    fillOpacity={isSel ? 1 : isCluster ? 0.95 : 0.8}
+                    eventHandlers={{click:()=>{setSelPt(i);setLabelEditing({idx:i,pt:p});}}}>
+                    {popup}
+                  </CircleMarker>
                 );
               })}
 
