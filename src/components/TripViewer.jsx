@@ -1224,55 +1224,75 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
                 <Polyline key={i} positions={s.pos} color={s.color} weight={3} opacity={0.85}/>
               ))}
 
-              {/* Marcadores de todos los puntos (no solo WORKING_STOP) */}
+              {/* Marcadores de todos los puntos */}
               {points.map((p, i) => {
                 if (p.lat == null || p.lon == null) return null;
                 const col    = pointColor(p);
                 const lbl    = pointLabel(p);
                 const isSel  = selPt === i;
                 const isHL   = highlightNum != null && p.servicio_num === highlightNum;
-                const radius = isSel || isHL ? 9 : p.servicio_num != null ? 7 : 4;
+                const isCluster = p.servicio_num != null;
 
-                // Solo renderizar puntos con etiqueta o cluster, o si es el seleccionado
+                // Tamaños:
+                // - highlight (seleccionado desde tabla): 11px, halo exterior
+                // - seleccionado por click: 9px, borde blanco
+                // - cluster normal: 8px, color del cluster
+                // - con etiqueta (tránsito etc): 5px
+                // - sin etiqueta: 3px gris
+                const radius = isHL ? 11 : isSel ? 9 : isCluster ? 8 : 5;
+
                 const hasLabel = p.state != null || p.servicio_num != null;
                 if (!hasLabel && !isSel) {
-                  // Punto sin clasificar: pequeño marcador gris
                   return (
                     <CircleMarker key={i} center={[p.lat,p.lon]} radius={3}
-                      color="#ccc" weight={1} fillColor="#ccc" fillOpacity={0.5}
+                      color="#ccc" weight={1} fillColor="#ccc" fillOpacity={0.4}
                       eventHandlers={{click:()=>{setSelPt(i);setLabelEditing({idx:i,pt:p});}}}>
                     </CircleMarker>
                   );
                 }
 
+                const popup = (
+                  <Popup>
+                    <div style={{fontSize:12,minWidth:180}}>
+                      <strong>{fmtDate(p.datetime)} {fmtTime(p.datetime)} {TZ_LABEL}</strong><br/>
+                      <span style={{fontSize:10,color:"#999"}}>{fmtTimeUTC(p.datetime)} UTC</span><br/>
+                      SOG: {p.sog!=null?`${Number(p.sog).toFixed(1)} kn`:"—"} | {p.zone}<br/>
+                      <span style={{color:col}}>{lbl}</span>
+                      {p.tipo_servicio && !["SIN_CLASIFICAR","BORRADO"].includes(p.tipo_servicio) && (
+                        <><br/><em style={{color:col,fontSize:10}}>
+                          {TIPOS_SERVICIO.find(t=>t.key===p.tipo_servicio)?.label ?? p.tipo_servicio}
+                        </em></>
+                      )}
+                      <button
+                        style={{marginTop:8,width:"100%",padding:"6px 0",borderRadius:6,
+                                background:"#235C96",color:"#fff",border:"none",
+                                fontSize:11,cursor:"pointer",fontWeight:600}}
+                        onClick={()=>setLabelEditing({idx:i,pt:p})}>
+                        ✏ Cambiar etiqueta
+                      </button>
+                    </div>
+                  </Popup>
+                );
+
                 return (
-                  <CircleMarker key={i} center={[p.lat,p.lon]} radius={radius}
-                    color={isSel?"#fff":col}
-                    weight={isSel?3:isHL?3:2}
-                    fillColor={col}
-                    fillOpacity={0.9}
-                    eventHandlers={{click:()=>{setSelPt(i);setLabelEditing({idx:i,pt:p});}}}>
-                    <Popup>
-                      <div style={{fontSize:12,minWidth:180}}>
-                        <strong>{fmtDate(p.datetime)} {fmtTime(p.datetime)} {TZ_LABEL}</strong><br/>
-                        <span style={{fontSize:10,color:"#999"}}>{fmtTimeUTC(p.datetime)} UTC</span><br/>
-                        SOG: {p.sog!=null?`${Number(p.sog).toFixed(1)} kn`:"—"} | {p.zone}<br/>
-                        <span style={{color:col}}>{lbl}</span>
-                        {p.tipo_servicio && !["SIN_CLASIFICAR","BORRADO"].includes(p.tipo_servicio) && (
-                          <><br/><em style={{color:col,fontSize:10}}>
-                            {TIPOS_SERVICIO.find(t=>t.key===p.tipo_servicio)?.label ?? p.tipo_servicio}
-                          </em></>
-                        )}
-                        <button
-                          style={{marginTop:8,width:"100%",padding:"6px 0",borderRadius:6,
-                                  background:"#235C96",color:"#fff",border:"none",
-                                  fontSize:11,cursor:"pointer",fontWeight:600}}
-                          onClick={()=>setLabelEditing({idx:i,pt:p})}>
-                          ✏ Cambiar etiqueta
-                        </button>
-                      </div>
-                    </Popup>
-                  </CircleMarker>
+                  <React.Fragment key={i}>
+                    {/* Halo exterior para puntos del cluster highlighteado */}
+                    {isHL && (
+                      <CircleMarker center={[p.lat,p.lon]} radius={radius + 6}
+                        color={col} weight={2} fillColor={col} fillOpacity={0.15}
+                        interactive={false}
+                      />
+                    )}
+                    {/* Marcador principal */}
+                    <CircleMarker center={[p.lat,p.lon]} radius={radius}
+                      color={isHL ? "#fff" : isSel ? "#fff" : isCluster ? "#fff" : col}
+                      weight={isHL ? 3 : isSel ? 3 : isCluster ? 2 : 1.5}
+                      fillColor={col}
+                      fillOpacity={isHL ? 1 : isSel ? 1 : isCluster ? 0.95 : 0.8}
+                      eventHandlers={{click:()=>{setSelPt(i);setLabelEditing({idx:i,pt:p});}}}>
+                      {popup}
+                    </CircleMarker>
+                  </React.Fragment>
                 );
               })}
 
