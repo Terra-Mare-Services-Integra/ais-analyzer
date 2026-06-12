@@ -502,7 +502,8 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
   }, [points]);
 
   const maxSvcNum = clusters.length ? Math.max(...clusters.map(c => c.num)) : 0;
-  const allClustersHaveTipo = clusters.length > 0 && clusters.every(c => c.tipoServicio);
+  const allClustersHaveTipo = clusters.every(c => c.tipoServicio); // true when clusters=[]
+  const canValidate = clusters.length === 0 || allClustersHaveTipo;
 
   // ─── POLYLINE segments (color por etiqueta) ───────────────────────────────
   const segments = useMemo(() => {
@@ -789,12 +790,18 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
 
   // ─── VALIDAR ─────────────────────────────────────────────────────────────────
   const handleValidate = useCallback(async () => {
-    if (!allClustersHaveTipo) return;
-    const resumen = clusters.map(c => {
-      const tipo = TIPOS_SERVICIO.find(t => t.key === c.tipoServicio)?.label ?? c.tipoServicio;
-      return `C${c.num} = ${tipo}`;
-    }).join(", ");
-    const ok = window.confirm(`Validar ${clusters.length} servicio${clusters.length!==1?"s":""}:\n${resumen}`);
+    if (!canValidate) return;
+    const resumen = clusters.length === 0
+      ? "Este viaje no tiene servicios."
+      : clusters.map(c => {
+          const tipo = TIPOS_SERVICIO.find(t => t.key === c.tipoServicio)?.label ?? c.tipoServicio;
+          return `C${c.num} = ${tipo}`;
+        }).join(", ");
+    const ok = window.confirm(
+      clusters.length === 0
+        ? "Validar viaje sin servicios:\nEste viaje no tuvo actividad en Zona Común. ¿Confirmar?"
+        : `Validar ${clusters.length} servicio${clusters.length!==1?"s":""}:\n${resumen}`
+    );
     if (!ok) return;
 
     const ct = trips[tripIdx];
@@ -824,7 +831,7 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
     } finally {
       setSaving(false);
     }
-  }, [trips, tripIdx, clusters, allClustersHaveTipo, setTrips, goTrip]);
+  }, [trips, tripIdx, clusters, canValidate, setTrips, goTrip]);
 
   // ─── KEYBOARD SHORTCUTS ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -928,14 +935,14 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
             : (
               <button
                 onClick={handleValidate}
-                disabled={!allClustersHaveTipo || clusters.length === 0}
-                title={!allClustersHaveTipo ? "Asigná tipo de servicio a todos los clusters primero" : ""}
+                disabled={!canValidate}
+                title={!canValidate ? "Asigná tipo de servicio a todos los clusters primero" : ""}
                 style={{
                   fontSize:11,padding:"5px 12px",borderRadius:6,fontWeight:600,
-                  border:`1px solid ${allClustersHaveTipo && clusters.length>0 ? "#16A34A" : "#D6E0ED"}`,
-                  background:allClustersHaveTipo && clusters.length>0 ? "#16A34A" : "#F3F4F6",
-                  color:allClustersHaveTipo && clusters.length>0 ? "#fff" : "#9CA3AF",
-                  cursor:allClustersHaveTipo && clusters.length>0 ? "pointer" : "not-allowed",
+                  border:`1px solid ${canValidate ? "#16A34A" : "#D6E0ED"}`,
+                  background:canValidate ? "#16A34A" : "#F3F4F6",
+                  color:canValidate ? "#fff" : "#9CA3AF",
+                  cursor:canValidate ? "pointer" : "not-allowed",
                   fontFamily:"var(--sans)",
                 }}>
                 ✓ Validar
@@ -969,10 +976,10 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
             </span>
             <span style={{
               fontSize:9,fontFamily:"var(--mono)",
-              color: clusters.length===0 ? "#A5B5CC" : allClustersHaveTipo ? "#1E7A4A" : "#92400E",
+              color: clusters.length===0 ? "#6381A7" : allClustersHaveTipo ? "#1E7A4A" : "#92400E",
             }}>
               {clusters.length === 0
-                ? "Sin clusters"
+                ? "Sin clusters — validable"
                 : allClustersHaveTipo
                   ? `${clusters.length} cluster${clusters.length!==1?"s":""} ✓`
                   : `${clusters.filter(c=>!c.tipoServicio).length} sin tipo`}
