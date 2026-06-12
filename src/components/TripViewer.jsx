@@ -63,19 +63,22 @@ const LABEL_META = {
 const MANUAL_LABELS = ["ZARPE","LLEGADA","ENTRADA_ZONA","SALIDA_ZONA","TRANSITO"];
 
 // Color para etiqueta de un punto (incluye C1/C2/C3...)
+// Paleta de clusters — 10 colores separados ~72° en el círculo cromático.
+// Ronda 1 (saturados, valor alto):  0° 72° 144° 216° 288°
+// Ronda 2 (mismos matices, oscuros): evita confusión con ronda 1 por brillo
+// Colores reservados del sistema excluidos:
+//   #213363 navy · #64B5F6 tránsito · #DC2626 llegada · #E91E63 zona común
 const SVC_COLORS = [
-  "#2196F3", // C1  azul
-  "#FF9800", // C2  naranja
-  "#E91E63", // C3  rosa
-  "#4CAF50", // C4  verde
-  "#9C27B0", // C5  violeta
-  "#F44336", // C6  rojo
-  "#00BCD4", // C7  cyan
-  "#FF5722", // C8  naranja oscuro
-  "#3F51B5", // C9  índigo
-  "#8BC34A", // C10 verde claro
-  "#FFC107", // C11 amarillo
-  "#009688", // C12 teal
+  "#E53935", // C1  rojo           (0°,  saturado)
+  "#43A047", // C2  verde          (72°, saturado)
+  "#00ACC1", // C3  cyan           (144°,saturado)
+  "#1E88E5", // C4  azul           (216°,saturado)
+  "#8E24AA", // C5  violeta        (288°,saturado)
+  "#F57F17", // C6  amarillo ocre  (0°+36°, cálido oscuro — distinto de C1 rojo)
+  "#2E7D32", // C7  verde oscuro   (72°, oscuro)
+  "#00695C", // C8  teal oscuro    (144°,oscuro)
+  "#1565C0", // C9  azul oscuro    (216°,oscuro)
+  "#6A1B9A", // C10 violeta oscuro (288°,oscuro)
 ];
 const svcColor = n => n != null ? SVC_COLORS[(n - 1) % SVC_COLORS.length] : "#9E9E9E";
 
