@@ -1166,7 +1166,7 @@ function ComparisonMode({ rawPoints, onApply, onClose }) {
   const resA = useMemo(() => runModelA(rawPoints), [rawPoints]);
   const resB = useMemo(() => runModelB(rawPoints), [rawPoints]);
   const resC = useMemo(() => runModelC(rawPoints), [rawPoints]);
-  const consensusMap = useMemo(
+  const { consensusMap } = useMemo(
     () => buildConsensus(rawPoints, resA, resB, resC),
     [rawPoints, resA, resB, resC]
   );
