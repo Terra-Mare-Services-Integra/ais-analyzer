@@ -639,7 +639,7 @@ function runModelA(points) {
     if (!cur) { cur = [item]; continue; }
     const last   = cur[cur.length - 1];
     const gapMin = (new Date(item.p.datetime) - new Date(last.p.datetime)) / 60000;
-    const ctr    = centroidOf(cur);
+    const ctr    = _centroidOf(cur);
     const distNm = (ctr && item.p.lat != null && item.p.lon != null)
       ? haversine(ctr.lat, ctr.lon, item.p.lat, item.p.lon) : 0;
     if (gapMin > 90 || distNm > 0.5) { rawGroups.push(cur); cur = [item]; }
