@@ -585,6 +585,517 @@ function PointsList({ points, selPt, setSelPt, onLabelClick, highlightNum }) {
   );
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── MULTI-MODEL DETECTION ENGINE ────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Cada modelo recibe el array de puntos del viaje y devuelve:
+//   Array<{ origIdx: number, servicio_num: number | null }>
+// Solo devuelve asignaciones para puntos de ZONA_COMUN.
+// Los puntos fuera de zona (ZARPE, TRANSITO, LLEGADA) los maneja el caller.
+//
+// Convención interna: servicio_num es 1-based dentro de cada modelo.
+// El consenso renumera desde 1 al final.
+
+const centroidOf = items => {
+  const valid = items.filter(({ p }) => p.lat != null && p.lon != null);
+  if (!valid.length) return null;
+  return {
+    lat: valid.reduce((s, { p }) => s + p.lat, 0) / valid.length,
+    lon: valid.reduce((s, { p }) => s + p.lon, 0) / valid.length,
+  };
+};
+
+// ─── MODELO A — "Conservador" ─────────────────────────────────────────────────
+// Fusiona agresivamente. Gap < 60 min → mismo cluster aunque SOG sea alto.
+// Puntos SOG > 3 kn se absorben al cluster precedente si hay uno activo y el
+// gap con el último punto del grupo es < 60 min.
+function runModelA(points) {
+  const zcPts = points
+    .map((p, i) => ({ p, i }))
+    .filter(({ p }) => p.zone === "ZONA_COMUN");
+
+  if (!zcPts.length) return [];
+
+  const MAX_GAP_MIN = 60;
+  const groups = [];
+  let cur = null;
+
+  for (const item of zcPts) {
+    if (!cur) {
+      cur = [item];
+      continue;
+    }
+    const last = cur[cur.length - 1];
+    const gapMin = (new Date(item.p.datetime) - new Date(last.p.datetime)) / 60000;
+    if (gapMin <= MAX_GAP_MIN) {
+      cur.push(item);
+    } else {
+      groups.push(cur);
+      cur = [item];
+    }
+  }
+  if (cur) groups.push(cur);
+
+  // Expandir cada grupo a todos los puntos ZC en el rango [min,max] índice
+  const result = [];
+  groups.forEach((grp, gi) => {
+    const minIdx = Math.min(...grp.map(({ i }) => i));
+    const maxIdx = Math.max(...grp.map(({ i }) => i));
+    zcPts
+      .filter(({ i }) => i >= minIdx && i <= maxIdx)
+      .forEach(({ i }) => result.push({ origIdx: i, servicio_num: gi + 1 }));
+  });
+  return result;
+}
+
+// ─── MODELO B — "Literal" (igual al algoritmo actual) ────────────────────────
+// SOG < 4 kn en ZC → candidato. Gap > 90 min O distancia al centroide > 0.5nm
+// rompe el cluster. Es el comportamiento actual del sistema.
+function runModelB(points) {
+  const zcPts = points
+    .map((p, i) => ({ p, i }))
+    .filter(({ p }) => p.zone === "ZONA_COMUN");
+
+  if (!zcPts.length) return [];
+
+  const MAX_GAP_MIN  = 90;
+  const MAX_DIST_NM  = 0.5;
+  const candidatos   = zcPts.filter(({ p }) => p.sog != null && p.sog < 4);
+
+  const groups = [];
+  let cur = null;
+  for (const item of candidatos) {
+    if (!cur) { cur = [item]; continue; }
+    const last   = cur[cur.length - 1];
+    const gapMin = (new Date(item.p.datetime) - new Date(last.p.datetime)) / 60000;
+    const ctr    = centroidOf(cur);
+    const distNm = (ctr && item.p.lat != null && item.p.lon != null)
+      ? haversine(ctr.lat, ctr.lon, item.p.lat, item.p.lon) : 0;
+    if (gapMin > MAX_GAP_MIN || distNm > MAX_DIST_NM) {
+      groups.push(cur);
+      cur = [item];
+    } else {
+      cur.push(item);
+    }
+  }
+  if (cur) groups.push(cur);
+
+  const result = [];
+  groups.forEach((grp, gi) => {
+    const minIdx = Math.min(...grp.map(({ i }) => i));
+    const maxIdx = Math.max(...grp.map(({ i }) => i));
+    zcPts
+      .filter(({ i }) => i >= minIdx && i <= maxIdx)
+      .forEach(({ i }) => result.push({ origIdx: i, servicio_num: gi + 1 }));
+  });
+  return result;
+}
+
+// ─── MODELO C — "Geoespacial" ─────────────────────────────────────────────────
+// Ignora el tiempo. Agrupa por proximidad geográfica: si un punto está a menos
+// de 500 metros de CUALQUIER punto ya en el cluster, se une a él.
+// Implementación: single-linkage clustering por distancia, procesando en orden
+// temporal para mantener numeración consistente.
+function runModelC(points) {
+  const MAX_DIST_M = 500; // metros
+  const MAX_DIST_NM = MAX_DIST_M / 1852;
+
+  const zcPts = points
+    .map((p, i) => ({ p, i }))
+    .filter(({ p }) => p.zone === "ZONA_COMUN" && p.lat != null && p.lon != null);
+
+  if (!zcPts.length) return [];
+
+  // Asignar cada punto al primer grupo donde algún miembro esté a < 500m.
+  // Si no encuentra ninguno, abre un grupo nuevo.
+  const groups = []; // Array<Array<{p, i}>>
+
+  for (const item of zcPts) {
+    let assigned = false;
+    for (const grp of groups) {
+      const close = grp.some(({ p }) =>
+        haversine(p.lat, p.lon, item.p.lat, item.p.lon) <= MAX_DIST_NM
+      );
+      if (close) {
+        grp.push(item);
+        assigned = true;
+        break;
+      }
+    }
+    if (!assigned) groups.push([item]);
+  }
+
+  // Convertir a result: ordenar grupos por índice mínimo (orden temporal)
+  groups.sort((a, b) => Math.min(...a.map(x=>x.i)) - Math.min(...b.map(x=>x.i)));
+  const result = [];
+  groups.forEach((grp, gi) => {
+    grp.forEach(({ i }) => result.push({ origIdx: i, servicio_num: gi + 1 }));
+  });
+  return result;
+}
+
+// ─── CONSENSUS ENGINE ────────────────────────────────────────────────────────
+// Input: resultados de los 3 modelos (arrays de {origIdx, servicio_num})
+// Output: {
+//   rows: Array<ConsensusRow>,      ← una fila por "evento de servicio"
+//   consensusMap: Map<origIdx, {servicio_num, ambiguous}>
+// }
+//
+// ConsensusRow: {
+//   eventId: number,
+//   pointIndices: number[],         ← índices originales
+//   modelA: string,                 ← "C1 (3pts)" o "—"
+//   modelB: string,
+//   modelC: string,
+//   consensus: string,
+//   ambiguous: boolean,
+// }
+//
+// Lógica de consenso: para cada par de puntos en el mismo grupo de UN modelo,
+// contamos cuántos modelos los agrupan juntos. Si ≥ 2 de 3 los agrupan juntos
+// → van al mismo cluster en el consenso.
+// Implementación simplificada: para cada punto, vemos si ≥ 2 modelos le asignan
+// el mismo "grupo canónico" (resolvemos por unión transitiva al final).
+function buildConsensus(points, resA, resB, resC) {
+  // Construir mapa origIdx → servicio_num por modelo
+  const mapA = new Map(resA.map(r => [r.origIdx, r.servicio_num]));
+  const mapB = new Map(resB.map(r => [r.origIdx, r.servicio_num]));
+  const mapC = new Map(resC.map(r => [r.origIdx, r.servicio_num]));
+
+  // Todos los índices ZC involucrados
+  const allZcIdx = [...new Set([
+    ...resA.map(r => r.origIdx),
+    ...resB.map(r => r.origIdx),
+    ...resC.map(r => r.origIdx),
+  ])].sort((a, b) => a - b);
+
+  if (!allZcIdx.length) return { rows: [], consensusMap: new Map() };
+
+  // ── Union-Find para consenso ─────────────────────────────────────────────
+  const parent = {};
+  allZcIdx.forEach(i => { parent[i] = i; });
+
+  const find = x => {
+    while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+    return x;
+  };
+  const union = (a, b) => { parent[find(a)] = find(b); };
+
+  // Para cada par de puntos dentro del mismo modelo, contar cuántos modelos
+  // los unen. Si ≥ 2 → hacer union en el consenso.
+  // Eficiencia: iteramos por grupos de cada modelo.
+  const groupsByModel = [mapA, mapB, mapC].map(m => {
+    const byGroup = {};
+    m.forEach((snum, idx) => {
+      if (!byGroup[snum]) byGroup[snum] = [];
+      byGroup[snum].push(idx);
+    });
+    return byGroup;
+  });
+
+  // Para cada par (i,j), contar en cuántos modelos están juntos
+  // Optimización: solo evaluar pares que están juntos en AL MENOS un modelo
+  const pairCount = new Map(); // "i-j" → count (i < j)
+  groupsByModel.forEach(byGroup => {
+    Object.values(byGroup).forEach(idxList => {
+      for (let a = 0; a < idxList.length; a++) {
+        for (let b = a + 1; b < idxList.length; b++) {
+          const key = `${Math.min(idxList[a],idxList[b])}-${Math.max(idxList[a],idxList[b])}`;
+          pairCount.set(key, (pairCount.get(key) ?? 0) + 1);
+        }
+      }
+    });
+  });
+
+  // Union si ≥ 2 modelos coinciden
+  pairCount.forEach((count, key) => {
+    if (count >= 2) {
+      const [a, b] = key.split("-").map(Number);
+      union(a, b);
+    }
+  });
+
+  // ── Construir grupos del consenso ────────────────────────────────────────
+  const consensusGroups = {};
+  allZcIdx.forEach(i => {
+    const root = find(i);
+    if (!consensusGroups[root]) consensusGroups[root] = [];
+    consensusGroups[root].push(i);
+  });
+
+  // Numerar grupos por orden temporal (índice mínimo)
+  const sortedRoots = Object.keys(consensusGroups)
+    .map(Number)
+    .sort((a, b) => Math.min(...consensusGroups[a]) - Math.min(...consensusGroups[b]));
+
+  const consensusMap = new Map();
+  sortedRoots.forEach((root, gi) => {
+    const snum = gi + 1;
+    // Ambiguo si los 3 modelos difieren para algún punto del grupo:
+    // verificamos si TODOS los puntos del grupo tienen el mismo snum en ≥ 2 modelos.
+    const indices = consensusGroups[root];
+    const groupPairs = [];
+    for (let a = 0; a < indices.length; a++) {
+      for (let b = a + 1; b < indices.length; b++) {
+        const key = `${Math.min(indices[a],indices[b])}-${Math.max(indices[a],indices[b])}`;
+        groupPairs.push(pairCount.get(key) ?? 0);
+      }
+    }
+    // Si algún par dentro del grupo tiene count=1 (solo 1 modelo los juntó),
+    // pero igual llegaron al mismo grupo por unión transitiva, marcar como ambiguo.
+    const ambiguous = groupPairs.length > 0 && groupPairs.some(c => c < 2);
+    indices.forEach(i => consensusMap.set(i, { servicio_num: snum, ambiguous }));
+  });
+
+  // ── Construir filas para la tabla comparativa ────────────────────────────
+  const modelLabel = (map, groupIndices) => {
+    const nums = [...new Set(groupIndices.map(i => map.get(i)).filter(n => n != null))];
+    if (!nums.length) return "—";
+    nums.sort((a, b) => a - b);
+    const label = nums.map(n => `C${n}`).join("+");
+    return `${label} (${groupIndices.filter(i => map.get(i) != null).length}pts)`;
+  };
+
+  const rows = sortedRoots.map((root, gi) => {
+    const indices   = consensusGroups[root].sort((a, b) => a - b);
+    const entry     = consensusMap.get(indices[0]);
+    const ambiguous = entry?.ambiguous ?? false;
+    return {
+      eventId:      gi + 1,
+      pointIndices: indices,
+      modelA:       modelLabel(mapA, indices),
+      modelB:       modelLabel(mapB, indices),
+      modelC:       modelLabel(mapC, indices),
+      consensus:    `C${gi + 1} (${indices.length}pts)${ambiguous ? " ⚠" : " ✓"}`,
+      ambiguous,
+    };
+  });
+
+  return { rows, consensusMap };
+}
+
+// ─── CONSENSUS MODAL ─────────────────────────────────────────────────────────
+function ConsensusModal({ points, onApply, onClose }) {
+  const resA = useMemo(() => runModelA(points), [points]);
+  const resB = useMemo(() => runModelB(points), [points]);
+  const resC = useMemo(() => runModelC(points), [points]);
+  const { rows, consensusMap } = useMemo(
+    () => buildConsensus(points, resA, resB, resC),
+    [points, resA, resB, resC]
+  );
+
+  useEffect(() => {
+    const h = e => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [onClose]);
+
+  const ambiguousCount = rows.filter(r => r.ambiguous).length;
+  const totalClusters  = rows.length;
+
+  const MODEL_COLS = [
+    { key: "modelA", label: "Modelo A", sub: "Conservador",  color: "#1565C0" },
+    { key: "modelB", label: "Modelo B", sub: "Literal",      color: "#2E7D32" },
+    { key: "modelC", label: "Modelo C", sub: "Geoespacial",  color: "#6A1B9A" },
+  ];
+
+  const thStyle = (color) => ({
+    padding: "8px 10px", fontSize: 9, fontWeight: 700,
+    textTransform: "uppercase", letterSpacing: ".6px",
+    color, fontFamily: "var(--mono)", textAlign: "center",
+    borderRight: "1px solid #EEF2F7", background: `${color}0A`,
+    whiteSpace: "nowrap",
+  });
+
+  const tdStyle = (color, isAmbiguous) => ({
+    padding: "7px 8px", fontSize: 10, textAlign: "center",
+    fontFamily: "var(--mono)", borderRight: "1px solid #EEF2F7",
+    color: color ?? "#213363",
+    background: isAmbiguous ? "#FFFBEB" : "transparent",
+  });
+
+  return (
+    <div role="dialog" aria-modal="true"
+      style={{
+        position: "fixed", inset: 0,
+        background: "rgba(0,0,0,.55)", zIndex: 9999,
+        display: "flex", alignItems: "center", justifyContent: "center", padding: 16,
+      }}
+      onClick={onClose}>
+      <div style={{
+        background: "#fff", borderRadius: 14, width: "100%", maxWidth: 780,
+        maxHeight: "85vh", display: "flex", flexDirection: "column",
+        boxShadow: "0 24px 64px rgba(0,0,0,.3)",
+      }}
+        onClick={e => e.stopPropagation()}>
+
+        {/* Header */}
+        <div style={{
+          padding: "16px 20px 12px", borderBottom: "1px solid #D6E0ED",
+          display: "flex", alignItems: "flex-start", justifyContent: "space-between",
+          flexShrink: 0,
+        }}>
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: "#213363", marginBottom: 3 }}>
+              ⚡ Detección multi-modelo
+            </div>
+            <div style={{ fontSize: 10, color: "#6381A7" }}>
+              3 algoritmos corridos en paralelo · {totalClusters} evento{totalClusters !== 1 ? "s" : ""} detectado{totalClusters !== 1 ? "s" : ""}
+              {ambiguousCount > 0 && (
+                <span style={{ marginLeft: 8, color: "#92400E", fontWeight: 600 }}>
+                  · {ambiguousCount} ⚠ ambiguo{ambiguousCount !== 1 ? "s" : ""}
+                </span>
+              )}
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            style={{
+              background: "none", border: "none", cursor: "pointer",
+              fontSize: 18, color: "#9CA3AF", lineHeight: 1, padding: 4,
+            }}>✕</button>
+        </div>
+
+        {/* Legend */}
+        <div style={{
+          padding: "8px 20px", borderBottom: "1px solid #EEF2F7",
+          display: "flex", gap: 20, flexShrink: 0, background: "#F8FAFC",
+        }}>
+          {MODEL_COLS.map(m => (
+            <div key={m.key} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{
+                width: 10, height: 10, borderRadius: 2,
+                background: m.color, display: "inline-block", flexShrink: 0,
+              }}/>
+              <span style={{ fontSize: 10, fontWeight: 700, color: m.color }}>{m.label}</span>
+              <span style={{ fontSize: 9, color: "#9CA3AF" }}>— {m.sub}</span>
+            </div>
+          ))}
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: "auto" }}>
+            <span style={{ fontSize: 10, color: "#1E7A4A", fontWeight: 600 }}>✓ consenso</span>
+            <span style={{ fontSize: 10, color: "#92400E", fontWeight: 600, marginLeft: 8 }}>⚠ ambiguo</span>
+          </div>
+        </div>
+
+        {/* Table */}
+        <div style={{ flex: 1, overflowY: "auto", overflowX: "auto" }}>
+          {rows.length === 0 ? (
+            <div style={{ padding: 32, textAlign: "center", color: "#6381A7", fontSize: 12 }}>
+              No se detectaron clusters de servicio en este viaje.
+            </div>
+          ) : (
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, tableLayout: "fixed" }}>
+              <colgroup>
+                <col style={{ width: "6%" }}/>
+                <col style={{ width: "23%" }}/>
+                <col style={{ width: "23%" }}/>
+                <col style={{ width: "23%" }}/>
+                <col style={{ width: "25%" }}/>
+              </colgroup>
+              <thead>
+                <tr style={{ position: "sticky", top: 0, zIndex: 1 }}>
+                  <th style={{ ...thStyle("#6381A7"), background: "#F8FAFC", borderRight: "1px solid #EEF2F7" }}>
+                    #
+                  </th>
+                  {MODEL_COLS.map(m => (
+                    <th key={m.key} style={thStyle(m.color)}>
+                      {m.label}<br/>
+                      <span style={{ fontSize: 8, fontWeight: 400, opacity: .7 }}>{m.sub}</span>
+                    </th>
+                  ))}
+                  <th style={{
+                    padding: "8px 10px", fontSize: 9, fontWeight: 700,
+                    textTransform: "uppercase", letterSpacing: ".6px",
+                    color: "#1E7A4A", fontFamily: "var(--mono)", textAlign: "center",
+                    background: "#F0FDF4",
+                  }}>
+                    Consenso
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, ri) => {
+                  const rowBg = row.ambiguous ? "#FFFBEB" : ri % 2 === 0 ? "#fff" : "#FAFBFC";
+                  const col   = svcColor(row.eventId);
+                  return (
+                    <tr key={row.eventId}
+                      style={{ borderBottom: "1px solid #EEF2F7", background: rowBg }}>
+                      {/* # */}
+                      <td style={{
+                        padding: "8px 6px", textAlign: "center", fontFamily: "var(--mono)",
+                        fontSize: 11, fontWeight: 800, color: col,
+                        borderRight: "1px solid #EEF2F7",
+                        borderLeft: `3px solid ${col}`,
+                      }}>
+                        C{row.eventId}
+                      </td>
+                      {/* Modelos */}
+                      {MODEL_COLS.map(m => (
+                        <td key={m.key} style={tdStyle(
+                          row[m.key] === "—" ? "#C4CADC" : m.color,
+                          row.ambiguous,
+                        )}>
+                          {row[m.key]}
+                        </td>
+                      ))}
+                      {/* Consenso */}
+                      <td style={{
+                        padding: "7px 10px", fontSize: 10, textAlign: "center",
+                        fontFamily: "var(--mono)", fontWeight: 700,
+                        color: row.ambiguous ? "#92400E" : "#1E7A4A",
+                        background: row.ambiguous ? "#FEF3C7" : "#F0FDF4",
+                      }}>
+                        {row.consensus}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        {/* Footer / actions */}
+        <div style={{
+          padding: "12px 20px", borderTop: "1px solid #D6E0ED",
+          display: "flex", alignItems: "center", gap: 10, flexShrink: 0,
+          background: "#F8FAFC",
+        }}>
+          {ambiguousCount > 0 && (
+            <span style={{
+              fontSize: 10, color: "#92400E", background: "#FEF3C7",
+              padding: "4px 10px", borderRadius: 5, fontWeight: 600,
+            }}>
+              ⚠ {ambiguousCount} evento{ambiguousCount !== 1 ? "s" : ""} ambiguo{ambiguousCount !== 1 ? "s" : ""} — quedarán resaltados para revisión
+            </span>
+          )}
+          <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+            <button
+              onClick={onClose}
+              style={{
+                padding: "8px 16px", borderRadius: 7, border: "1px solid #D6E0ED",
+                background: "#fff", color: "#6381A7", fontSize: 11,
+                cursor: "pointer", fontFamily: "var(--sans)",
+              }}>
+              Cancelar
+            </button>
+            <button
+              onClick={() => onApply(consensusMap)}
+              style={{
+                padding: "8px 18px", borderRadius: 7, border: "none",
+                background: "#16A34A", color: "#fff", fontSize: 11,
+                fontWeight: 700, cursor: "pointer", fontFamily: "var(--sans)",
+              }}>
+              ✓ Usar consenso
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── COMPONENTE PRINCIPAL ─────────────────────────────────────────────────────
 export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) {
   const [tripIdx,      setTripIdx]      = useState(initialIdx);
@@ -595,8 +1106,9 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
   const [toast,        setToast]        = useState(null); // {msg, type}
   const [autoRunning,  setAutoRunning]  = useState(false);
   const [resetRunning, setResetRunning] = useState(false);
-  const [highlightNum, setHighlightNum] = useState(null); // cluster num seleccionado
-  const [zoomTarget,   setZoomTarget]   = useState(null); // array de puntos para zoom
+  const [highlightNum,  setHighlightNum]  = useState(null); // cluster num seleccionado
+  const [zoomTarget,    setZoomTarget]    = useState(null); // array de puntos para zoom
+  const [consensusData, setConsensusData] = useState(null); // {points} para el modal
 
   const trip   = trips?.[tripIdx] ?? null;
   const points = trip?.points ?? [];
@@ -755,18 +1267,20 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
     }
   }, [trips, tripIdx, setTrips]);
 
-  // ─── AUTO-DETECTAR ────────────────────────────────────────────────────────────
-  // Asigna etiqueta a CADA punto del viaje:
-  //   - Primer punto global → ZARPE
-  //   - Último punto global → LLEGADA
-  //   - ZONA_COMUN, SOG < 4 → candidato a cluster (agrupados por gap > 90 min)
-  //   - ZONA_COMUN, SOG >= 4 → TRANSITO
-  //   - Primer punto de ZC → ENTRADA_ZONA (si no es cluster)
-  //   - Último punto de ZC → SALIDA_ZONA (si no es cluster)
-  //   - Resto (fuera de zona, navegando) → TRANSITO
-  const handleAutoDetect = useCallback(async () => {
+  // ─── AUTO-DETECTAR → abre modal de consenso ──────────────────────────────
+  const handleAutoDetect = useCallback(() => {
     const ct = trips[tripIdx];
     if (!ct) return;
+    setConsensusData({ points: ct.points });
+  }, [trips, tripIdx]);
+
+  // ─── APLICAR CONSENSO (desde el modal) ───────────────────────────────────
+  // consensusMap: Map<origIdx, {servicio_num, ambiguous}>
+  const handleApplyConsensus = useCallback(async (consensusMap) => {
+    const ct = trips[tripIdx];
+    if (!ct) return;
+
+    setConsensusData(null);
     setAutoRunning(true);
 
     try {
@@ -774,143 +1288,55 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
         .map((p, i) => ({ p, i }))
         .filter(({ p }) => p.zone === "ZONA_COMUN");
 
-      // Si no hay ZC igual etiquetamos ZARPE / TRANSITO / LLEGADA
-      if (!zcPts.length) {
-        const newPoints = ct.points.map((p, i) => ({
-          ...p,
-          state: i === 0 ? "ZARPE" : i === ct.points.length - 1 ? "LLEGADA" : "TRANSITO",
-          servicio_num: null,
-        }));
-        const newTrips = trips.map((t, ti) =>
-          ti === tripIdx ? { ...t, points: newPoints, nServices: 0 } : t
-        );
-        setTrips(newTrips);
-        if (ct.supabaseId) {
-          // batch: ZARPE, TRANSITO, LLEGADA
-          const groups = { ZARPE:[], TRANSITO:[], LLEGADA:[] };
-          newPoints.forEach(p => {
-            const st = p.state;
-            if (groups[st]) groups[st].push(
-              p.datetime instanceof Date ? p.datetime.toISOString() : new Date(p.datetime).toISOString()
-            );
-          });
-          for (const [state, dts] of Object.entries(groups)) {
-            if (!dts.length) continue;
-            const { error } = await supabase.from("ais_points")
-              .update({ state, servicio_num: null })
-              .eq("trip_id", ct.supabaseId).in("datetime", dts);
-            if (error) throw error;
-          }
-        }
-        showToast("0 clusters — ZARPE / TRÁNSITO / LLEGADA asignados", "ok");
-        return;
-      }
+      // Construir updates completo (igual que handleAutoDetect original)
+      const updates = {}; // origIdx → {state, servicio_num, ambiguous}
 
-      // Paso 1: agrupar candidatos en clusters.
-      // Criterio de corte (cualquiera rompe el cluster):
-      //   (A) Gap temporal > 90 min entre candidatos consecutivos
-      //   (B) Distancia del nuevo punto al CENTROIDE del cluster activo > 0.5nm
-      //       (centroide = promedio lat/lon de todos los puntos del grupo actual)
-      //       Esto detecta que el barco se movió a otro buque aunque no haya
-      //       quedado registrado ningún punto de tránsito entre mediciones.
-      const CLUSTER_MAX_GAP_MIN    = 90;   // minutos
-      const CLUSTER_MAX_DIST_NM    = 0.5;  // millas náuticas al centroide
-
-      const candidatos = zcPts.filter(({ p }) => p.sog != null && p.sog < 4);
-
-      // Calcula centroide (lat/lon promedio) de un grupo de items
-      const centroid = grp => {
-        const valid = grp.filter(({ p }) => p.lat != null && p.lon != null);
-        if (!valid.length) return null;
-        const lat = valid.reduce((s, { p }) => s + p.lat, 0) / valid.length;
-        const lon = valid.reduce((s, { p }) => s + p.lon, 0) / valid.length;
-        return { lat, lon };
-      };
-
-      const clusterGroups = [];
-      let curGroup = null;
-      for (const item of candidatos) {
-        if (!curGroup) {
-          curGroup = [item];
-        } else {
-          const last    = curGroup[curGroup.length - 1];
-          const gapMin  = (new Date(item.p.datetime) - new Date(last.p.datetime)) / 60000;
-
-          // Distancia al centroide del cluster actual
-          const ctr     = centroid(curGroup);
-          const distNm  = (ctr && item.p.lat != null && item.p.lon != null)
-            ? haversine(ctr.lat, ctr.lon, item.p.lat, item.p.lon)
-            : 0;
-
-          if (gapMin > CLUSTER_MAX_GAP_MIN || distNm > CLUSTER_MAX_DIST_NM) {
-            clusterGroups.push(curGroup);
-            curGroup = [item];
-          } else {
-            curGroup.push(item);
-          }
-        }
-      }
-      if (curGroup) clusterGroups.push(curGroup);
-
-      // Paso 2: construir mapa de índice → nueva asignación
-      const updates = {}; // origIdx → {state, servicio_num}
-
-      // Marcar clusters: incluir TODOS los puntos de ZC entre el primer y último
-      // candidato del grupo (no solo los de SOG < 4 — los puntos con SOG nulo
-      // o cualquier punto intermedio en el rango temporal también son del cluster).
-      clusterGroups.forEach((grp, gi) => {
-        const minOrigIdx = Math.min(...grp.map(({ i }) => i));
-        const maxOrigIdx = Math.max(...grp.map(({ i }) => i));
-        // Todos los puntos ZC dentro de [minOrigIdx, maxOrigIdx] pertenecen al cluster
-        zcPts
-          .filter(({ i }) => i >= minOrigIdx && i <= maxOrigIdx)
-          .forEach(({ i }) => {
-            updates[i] = { state: null, servicio_num: gi + 1 };
-          });
+      // Aplicar asignaciones del consenso
+      consensusMap.forEach(({ servicio_num, ambiguous }, origIdx) => {
+        updates[origIdx] = { state: null, servicio_num, ambiguous: ambiguous ?? false };
       });
 
-      // Marcar tránsito (ZONA_COMUN, SOG >= 4, no en ningún cluster)
+      // Puntos ZC no asignados por el consenso (SOG alto, sin cluster)
       zcPts.forEach(({ p, i }) => {
         if (updates[i]) return;
         if (p.sog != null && p.sog >= 4) {
-          updates[i] = { state: "TRANSITO", servicio_num: null };
+          updates[i] = { state: "TRANSITO", servicio_num: null, ambiguous: false };
         }
       });
 
-      // Marcar ENTRADA_ZONA (primer punto de ZC)
+      // ENTRADA / SALIDA de zona
       if (zcPts.length > 0) {
         const firstIdx = zcPts[0].i;
-        if (!updates[firstIdx]) {
-          updates[firstIdx] = { state: "ENTRADA_ZONA", servicio_num: null };
-        }
+        if (!updates[firstIdx]) updates[firstIdx] = { state: "ENTRADA_ZONA", servicio_num: null, ambiguous: false };
       }
-
-      // Marcar SALIDA_ZONA (último punto de ZC)
       if (zcPts.length > 1) {
         const lastIdx = zcPts[zcPts.length - 1].i;
-        if (!updates[lastIdx]) {
-          updates[lastIdx] = { state: "SALIDA_ZONA", servicio_num: null };
-        }
+        if (!updates[lastIdx]) updates[lastIdx] = { state: "SALIDA_ZONA", servicio_num: null, ambiguous: false };
       }
 
-      // Paso 2b: etiquetar TODOS los puntos restantes (fuera de ZC)
-      //   - índice 0 → ZARPE (override todo)
-      //   - índice last → LLEGADA (override todo)
-      //   - resto sin etiqueta → TRANSITO
+      // Todos los puntos: ZARPE / TRANSITO / LLEGADA
       ct.points.forEach((p, i) => {
         if (i === 0) {
-          updates[i] = { state: "ZARPE", servicio_num: null };
+          updates[i] = { state: "ZARPE", servicio_num: null, ambiguous: false };
         } else if (i === ct.points.length - 1) {
-          updates[i] = { state: "LLEGADA", servicio_num: null };
+          updates[i] = { state: "LLEGADA", servicio_num: null, ambiguous: false };
         } else if (!updates[i]) {
-          updates[i] = { state: "TRANSITO", servicio_num: null };
+          updates[i] = { state: "TRANSITO", servicio_num: null, ambiguous: false };
         }
       });
 
-      // Paso 3: aplicar localmente
+      // Aplicar localmente — los puntos ambiguos quedan con servicio_num asignado
+      // pero se marcan con tipo_servicio = null para que la tabla los resalte en amarillo.
       const newPoints = ct.points.map((p, i) => {
         if (!updates[i]) return p;
-        return { ...p, state: updates[i].state, servicio_num: updates[i].servicio_num };
+        const u = updates[i];
+        return {
+          ...p,
+          state:        u.state,
+          servicio_num: u.servicio_num,
+          // Si es ambiguo y tiene servicio_num, limpiar tipo_servicio para forzar revisión
+          tipo_servicio: (u.ambiguous && u.servicio_num != null) ? null : p.tipo_servicio,
+        };
       });
 
       const nSvc = new Set(newPoints.filter(p => p.servicio_num != null).map(p => p.servicio_num)).size;
@@ -919,12 +1345,11 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
       );
       setTrips(newTrips);
 
-      // Paso 4: escribir en Supabase
+      // Escribir en Supabase
       if (ct.supabaseId) {
-        // Batch: agrupar por state+servicio_num para minimizar queries
         const byKey = {};
-        Object.entries(updates).forEach(([origIdx, upd]) => {
-          const p = ct.points[parseInt(origIdx, 10)];
+        Object.entries(updates).forEach(([origIdxStr, upd]) => {
+          const p = ct.points[parseInt(origIdxStr, 10)];
           const key = `${upd.state ?? "NULL"}__${upd.servicio_num ?? "NULL"}`;
           if (!byKey[key]) byKey[key] = { state: upd.state, servicio_num: upd.servicio_num, dts: [] };
           byKey[key].dts.push(
@@ -948,10 +1373,16 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
         if (errTrip) throw errTrip;
       }
 
-      showToast(`${clusterGroups.length} cluster${clusterGroups.length !== 1 ? "s" : ""} detectado${clusterGroups.length !== 1 ? "s" : ""}`, "ok");
+      const ambCount = [...consensusMap.values()].filter(v => v.ambiguous).length;
+      showToast(
+        ambCount > 0
+          ? `${nSvc} cluster${nSvc !== 1 ? "s" : ""} aplicados · ${ambCount} ⚠ ambiguo${ambCount !== 1 ? "s" : ""} para revisión`
+          : `${nSvc} cluster${nSvc !== 1 ? "s" : ""} detectados ✓`,
+        ambCount > 0 ? "info" : "ok"
+      );
     } catch (e) {
-      console.error("[TripViewer] Error en auto-detectar:", e?.message ?? e);
-      showToast("Error en auto-detección", "error");
+      console.error("[TripViewer] Error aplicando consenso:", e?.message ?? e);
+      showToast("Error al aplicar consenso", "error");
     } finally {
       setAutoRunning(false);
     }
@@ -1135,7 +1566,7 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
               background:autoRunning?"#FEF3C7":"#FFFBEB",color:"#92400E",
               cursor:autoRunning?"not-allowed":"pointer",fontWeight:600,fontFamily:"var(--sans)",
             }}>
-            {autoRunning ? "⏳ Detectando…" : "⚡ Auto-detectar"}
+            {autoRunning ? "⏳ Aplicando…" : "⚡ Auto-detectar"}
           </button>
 
           <button
@@ -1401,6 +1832,15 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
           </div>
         </div>
       </div>
+
+      {/* Modal de consenso multi-modelo */}
+      {consensusData && (
+        <ConsensusModal
+          points={consensusData.points}
+          onApply={handleApplyConsensus}
+          onClose={() => setConsensusData(null)}
+        />
+      )}
 
       {/* Selector de etiqueta */}
       {labelEditing && (
