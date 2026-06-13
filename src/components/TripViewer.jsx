@@ -606,10 +606,15 @@ const centroidOf = items => {
   };
 };
 
-// ─── MODELO A — "Conservador" ─────────────────────────────────────────────────
-// Fusiona agresivamente. Gap < 60 min → mismo cluster aunque SOG sea alto.
-// Puntos SOG > 3 kn se absorben al cluster precedente si hay uno activo y el
-// gap con el último punto del grupo es < 60 min.
+// ─── MODELO A — "Conservador v2" ─────────────────────────────────────────────
+// Regla 1: clusters de punto único → Tránsito (no son evidencia de estadía real)
+// Regla 2: dos clusters consecutivos se fusionan SOLO si se cumplen AMBAS:
+//   - distancia entre último punto del C1 y primer punto del C2 < MERGE_DIST_M metros
+//   - gap temporal entre esos mismos puntos < MERGE_GAP_HS horas
+// Parámetros configurables — valores por defecto consensuados con el equipo:
+const MODEL_A_MERGE_DIST_M  = 500;   // metros
+const MODEL_A_MERGE_GAP_HS  = 2;     // horas
+
 function runModelA(points) {
   const zcPts = points
     .map((p, i) => ({ p, i }))
@@ -617,27 +622,75 @@ function runModelA(points) {
 
   if (!zcPts.length) return [];
 
-  const MAX_GAP_MIN = 60;
-  const groups = [];
+  // ── Paso 1: detección base (SOG < 4 kn en ZC) ────────────────────────────
+  // Igual que Modelo B: cada grupo contiguo de puntos lentos es un cluster
+  // candidato. El gap > 90 min o dist > 0.5nm rompe el grupo.
+  const candidatos = zcPts.filter(({ p }) => p.sog != null && p.sog < 4);
+
+  const rawGroups = []; // Array<Array<{p,i}>>
   let cur = null;
-
-  for (const item of zcPts) {
-    if (!cur) {
-      cur = [item];
-      continue;
-    }
-    const last = cur[cur.length - 1];
+  for (const item of candidatos) {
+    if (!cur) { cur = [item]; continue; }
+    const last   = cur[cur.length - 1];
     const gapMin = (new Date(item.p.datetime) - new Date(last.p.datetime)) / 60000;
-    if (gapMin <= MAX_GAP_MIN) {
-      cur.push(item);
-    } else {
-      groups.push(cur);
-      cur = [item];
-    }
+    const ctr    = centroidOf(cur);
+    const distNm = (ctr && item.p.lat != null && item.p.lon != null)
+      ? haversine(ctr.lat, ctr.lon, item.p.lat, item.p.lon) : 0;
+    if (gapMin > 90 || distNm > 0.5) { rawGroups.push(cur); cur = [item]; }
+    else { cur.push(item); }
   }
-  if (cur) groups.push(cur);
+  if (cur) rawGroups.push(cur);
 
-  // Expandir cada grupo a todos los puntos ZC en el rango [min,max] índice
+  // ── Paso 2 — Regla 1: descartar clusters de punto único ──────────────────
+  // Un único punto no es evidencia suficiente de estadía operativa.
+  let groups = rawGroups.filter(grp => grp.length > 1);
+
+  if (!groups.length) return [];
+
+  // ── Paso 3 — Regla 2: fusión por proximidad + gap (ambas condiciones) ────
+  // Recorremos pares consecutivos. Si el último punto del grupo A y el primer
+  // punto del grupo B están a < MERGE_DIST_M metros Y < MERGE_GAP_HS horas,
+  // se fusionan. Iteramos hasta que no haya más fusiones posibles.
+  const MERGE_DIST_NM = MODEL_A_MERGE_DIST_M / 1852;
+  const MERGE_GAP_MS  = MODEL_A_MERGE_GAP_HS * 3600 * 1000;
+
+  let merged = true;
+  while (merged) {
+    merged = false;
+    const next = [];
+    let i = 0;
+    while (i < groups.length) {
+      if (i === groups.length - 1) { next.push(groups[i]); i++; continue; }
+
+      const g1 = groups[i];
+      const g2 = groups[i + 1];
+      const lastPt  = g1[g1.length - 1]; // último punto de g1
+      const firstPt = g2[0];             // primer punto de g2
+
+      const gapMs = new Date(firstPt.p.datetime) - new Date(lastPt.p.datetime);
+      const distNm = (lastPt.p.lat != null && lastPt.p.lon != null &&
+                      firstPt.p.lat != null && firstPt.p.lon != null)
+        ? haversine(lastPt.p.lat, lastPt.p.lon, firstPt.p.lat, firstPt.p.lon)
+        : Infinity;
+
+      const gapOk  = gapMs  < MERGE_GAP_MS;
+      const distOk = distNm < MERGE_DIST_NM;
+
+      if (gapOk && distOk) {
+        // Fusionar: combinar los dos grupos en uno
+        next.push([...g1, ...g2]);
+        merged = true;
+        i += 2; // saltar ambos grupos
+      } else {
+        next.push(g1);
+        i++;
+      }
+    }
+    groups = next;
+  }
+
+  // ── Paso 4: expandir grupos — incluir todos los puntos ZC en el rango ────
+  // (igual que los otros modelos: puntos intermedios entre candidatos)
   const result = [];
   groups.forEach((grp, gi) => {
     const minIdx = Math.min(...grp.map(({ i }) => i));
@@ -648,6 +701,7 @@ function runModelA(points) {
   });
   return result;
 }
+
 
 // ─── MODELO B — "Literal" (igual al algoritmo actual) ────────────────────────
 // SOG < 4 kn en ZC → candidato. Gap > 90 min O distancia al centroide > 0.5nm
