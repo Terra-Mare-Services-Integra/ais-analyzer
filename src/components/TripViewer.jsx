@@ -984,177 +984,357 @@ function buildPointsFromModelResult(rawPoints, modelResult, consensusMap) {
   });
 }
 
-// ─── SyncedMapView ────────────────────────────────────────────────────────────
-// Un mapa individual dentro del grid de comparación.
-// props:
-//   label       — "Modelo A", "Consenso", etc.
-//   sublabel    — "Conservador", "2 de 3", etc.
-//   accentColor — color del header del mapa
-//   points      — array de puntos hydrated (con servicio_num asignado)
-//   clusterCount — número de clusters detectados
-//   mapRefs     — ref compartido con los otros 3 mapas
-//   ownIdx      — 0..3, identifica este mapa en mapRefs
-//   onUse       — callback "Usar este"
-//   onEdit      — callback "Editar este"
-//   initialCenter/initialZoom — para primer fit compartido
-function SyncedMapView({
-  label, sublabel, accentColor,
-  points, clusterCount, ambiguousCount,
-  mapRefs, ownIdx,
-  onUse, onEdit,
-}) {
-  // Construir segmentos de polilínea coloreados
-  const segments = useMemo(() => {
-    const segs = [];
-    for (let i = 0; i < points.length - 1; i++) {
-      const p   = points[i];
-      const col = p._ambiguous ? "#F59E0B" : pointColor(p);
-      segs.push({
-        pos:   [[p.lat, p.lon], [points[i+1].lat, points[i+1].lon]],
-        color: col,
-      });
-    }
-    return segs;
+// ─── ModelTable ──────────────────────────────────────────────────────────────
+// Tabla de secuencia para el Modo Comparación.
+// Muestra clusters agrupados por servicio_num, sin dropdowns de edición
+// (la edición ocurre después de "Usar este" / "Editar este").
+function ModelTable({ points, accentColor, label, sublabel, clusterCount,
+                      ambiguousCount, onUse, onEdit }) {
+  // Agrupar puntos por servicio_num para mostrar filas de cluster
+  const clusterRows = useMemo(() => {
+    const byNum = {};
+    points.forEach(p => {
+      if (p.servicio_num == null) return;
+      if (!byNum[p.servicio_num]) byNum[p.servicio_num] = [];
+      byNum[p.servicio_num].push(p);
+    });
+    return Object.entries(byNum)
+      .map(([numStr, pts]) => ({
+        num: parseInt(numStr, 10),
+        pts,
+        ambiguous: pts.some(p => p._ambiguous),
+        horas: pts.map(p => fmtTime(p.datetime)),
+        sogs: pts.map(p => p.sog == null ? "—" : p.sog === 0 ? "⚓" : `${Number(p.sog).toFixed(1)}kn`),
+      }))
+      .sort((a, b) => a.num - b.num);
   }, [points]);
+
+  const col = accentColor;
 
   return (
     <div style={{
       display: "flex", flexDirection: "column",
-      border: "1px solid #D6E0ED", borderRadius: 8,
-      overflow: "hidden", background: "#fff",
-      boxShadow: "0 1px 4px rgba(0,0,0,.08)",
+      background: "#fff", height: "100%",
+      border: `1px solid ${col}44`, borderRadius: 8,
+      overflow: "hidden",
     }}>
-      {/* Header del mapa */}
+      {/* Header */}
       <div style={{
-        padding: "6px 10px", background: accentColor,
-        display: "flex", alignItems: "center", justifyContent: "space-between",
-        flexShrink: 0,
+        padding: "8px 10px", background: col, flexShrink: 0,
+        display: "flex", flexDirection: "column", gap: 2,
       }}>
-        <div>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <span style={{ fontSize: 11, fontWeight: 800, color: "#fff", fontFamily: "var(--sans)" }}>
             {label}
           </span>
-          <span style={{ fontSize: 9, color: "rgba(255,255,255,.7)", marginLeft: 6, fontFamily: "var(--mono)" }}>
-            {sublabel}
-          </span>
-        </div>
-        <div style={{ display: "flex", gap: 5 }}>
           <span style={{
             fontSize: 9, fontWeight: 700, color: "#fff",
-            background: "rgba(255,255,255,.2)", padding: "2px 7px", borderRadius: 10,
+            background: "rgba(255,255,255,.25)", padding: "1px 6px", borderRadius: 8,
             fontFamily: "var(--mono)",
           }}>
-            {clusterCount} cluster{clusterCount !== 1 ? "s" : ""}
+            {clusterCount} C
           </span>
-          {ambiguousCount > 0 && (
-            <span style={{
-              fontSize: 9, fontWeight: 700, color: "#92400E",
-              background: "#FEF3C7", padding: "2px 7px", borderRadius: 10,
-              fontFamily: "var(--mono)",
-            }}>
-              ⚠ {ambiguousCount}
-            </span>
-          )}
         </div>
+        <span style={{ fontSize: 8, color: "rgba(255,255,255,.65)", fontFamily: "var(--mono)" }}>
+          {sublabel}
+          {ambiguousCount > 0 && (
+            <span style={{ marginLeft: 6, color: "#FEF3C7" }}>⚠ {ambiguousCount}</span>
+          )}
+        </span>
       </div>
 
-      {/* Mapa Leaflet */}
-      <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
-        <MapContainer
-          center={[-34.7, -58.0]}
-          zoom={9}
-          style={{ height: "100%", width: "100%" }}
-          zoomControl={ownIdx === 0}
-        >
-          <TileLayer
-            attribution="© OpenStreetMap contributors"
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-          />
-          <MapFitOnce points={points} />
-          <MapSyncController mapRefs={mapRefs} ownIdx={ownIdx} />
-
-          {/* Zonas geográficas */}
-          {Object.entries(ZONES).map(([key, z]) => (
-            <Polygon key={key}
-              positions={z.polygon.map(([a,b]) => [a,b])}
-              pathOptions={{ color: z.color, weight: 1, opacity: 0.5,
-                             fillColor: z.color, fillOpacity: 0.06, dashArray: "4,4" }}>
-            </Polygon>
-          ))}
-
-          {/* Polilíneas */}
-          {segments.map((s, i) => (
-            <Polyline key={`${i}-${s.color}`} positions={s.pos} color={s.color} weight={2.5} opacity={0.8} />
-          ))}
-
-          {/* Marcadores */}
-          {points.map((p, i) => {
-            if (p.lat == null || p.lon == null) return null;
-            const isCluster  = p.servicio_num != null;
-            const isAmbiguous = p._ambiguous;
-            const col = isAmbiguous ? "#F59E0B" : pointColor(p);
-
-            if (!isCluster && p.state !== "ZARPE" && p.state !== "LLEGADA") {
-              return (
-                <CircleMarker key={i} center={[p.lat, p.lon]} radius={2}
-                  color="#ccc" weight={1} fillColor="#ccc" fillOpacity={0.35} />
-              );
-            }
-
-            const radius = (p.state === "ZARPE" || p.state === "LLEGADA") ? 8
-              : isAmbiguous ? 9 : 7;
-
-            return (
-              <CircleMarker key={`${i}-${p.servicio_num ?? p.state}`}
-                center={[p.lat, p.lon]} radius={radius}
-                color={isCluster ? "#fff" : col} weight={isCluster ? 1.5 : 2}
-                fillColor={col} fillOpacity={0.95}>
-                <Popup>
-                  <div style={{ fontSize: 11 }}>
-                    <strong style={{ color: col }}>
-                      {isAmbiguous ? "⚠ Ambiguo" : isCluster ? `C${p.servicio_num}` : p.state}
-                    </strong><br />
-                    {fmtTime(p.datetime)} {TZ_LABEL}<br />
-                    SOG: {p.sog != null ? `${Number(p.sog).toFixed(1)} kn` : "—"}
-                  </div>
-                </Popup>
-              </CircleMarker>
-            );
-          })}
-        </MapContainer>
+      {/* Tabla scrolleable */}
+      <div style={{ flex: 1, overflowY: "auto", fontSize: 10 }}>
+        {clusterRows.length === 0 ? (
+          <div style={{ padding: "16px 10px", textAlign: "center", color: "#A5B5CC", fontSize: 10 }}>
+            Sin clusters
+          </div>
+        ) : (
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ background: "#F8FAFC", borderBottom: `2px solid ${col}33` }}>
+                <th style={{ padding: "4px 6px", fontSize: 8, color: "#6381A7", fontWeight: 600,
+                             fontFamily: "var(--mono)", textAlign: "center", letterSpacing: ".5px" }}>
+                  CL
+                </th>
+                <th style={{ padding: "4px 4px", fontSize: 8, color: "#6381A7", fontWeight: 600,
+                             fontFamily: "var(--mono)", textAlign: "center" }}>
+                  HORA
+                </th>
+                <th style={{ padding: "4px 4px", fontSize: 8, color: "#6381A7", fontWeight: 600,
+                             fontFamily: "var(--mono)", textAlign: "center" }}>
+                  SOG
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {clusterRows.map((row, ri) => {
+                const cCol = row.ambiguous ? "#F59E0B" : svcColor(row.num);
+                const bg   = row.ambiguous ? "#FFFBEB" : ri % 2 === 0 ? "#fff" : "#FAFBFC";
+                return (
+                  <tr key={row.num} style={{
+                    borderBottom: "1px solid #F5F7FA",
+                    background: bg,
+                    borderLeft: `3px solid ${cCol}`,
+                  }}>
+                    <td style={{
+                      padding: "5px 6px", textAlign: "center",
+                      fontFamily: "var(--mono)", fontSize: 11, fontWeight: 800, color: cCol,
+                    }}>
+                      {row.ambiguous ? "⚠" : `C${row.num}`}
+                    </td>
+                    <td style={{
+                      padding: "5px 4px", fontFamily: "var(--mono)", fontSize: 9,
+                      color: "#213363", lineHeight: 1.5,
+                    }}>
+                      {row.horas.map((h, i) => (
+                        <span key={i} style={{ display: "block" }}>{h}</span>
+                      ))}
+                    </td>
+                    <td style={{
+                      padding: "5px 4px", fontFamily: "var(--mono)", fontSize: 9,
+                      color: "#1E7A4A", textAlign: "center", lineHeight: 1.5,
+                    }}>
+                      {row.sogs.map((s, i) => (
+                        <span key={i} style={{ display: "block" }}>{s}</span>
+                      ))}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
       </div>
 
-      {/* Footer con botones */}
+      {/* Botones */}
       <div style={{
-        padding: "7px 10px", borderTop: "1px solid #EEF2F7",
-        display: "flex", gap: 6, flexShrink: 0, background: "#F8FAFC",
+        padding: "7px 8px", borderTop: `1px solid ${col}33`,
+        display: "flex", gap: 5, flexShrink: 0, background: "#F8FAFC",
       }}>
-        <button
-          onClick={onEdit}
-          style={{
-            flex: 1, padding: "6px 0", borderRadius: 6, fontSize: 10,
-            border: `1px solid ${accentColor}`, background: "#fff",
-            color: accentColor, fontWeight: 600, cursor: "pointer",
-            fontFamily: "var(--sans)",
-          }}>
-          ✏ Editar este
+        <button onClick={onEdit} style={{
+          flex: 1, padding: "6px 0", borderRadius: 6, fontSize: 10,
+          border: `1.5px solid ${col}`, background: "#fff",
+          color: col, fontWeight: 700, cursor: "pointer", fontFamily: "var(--sans)",
+        }}>
+          ✏ Editar
         </button>
-        <button
-          onClick={onUse}
-          style={{
-            flex: 1, padding: "6px 0", borderRadius: 6, fontSize: 10,
-            border: "none", background: accentColor,
-            color: "#fff", fontWeight: 700, cursor: "pointer",
-            fontFamily: "var(--sans)",
-          }}>
-          ✓ Usar este
+        <button onClick={onUse} style={{
+          flex: 1, padding: "6px 0", borderRadius: 6, fontSize: 10,
+          border: "none", background: col,
+          color: "#fff", fontWeight: 700, cursor: "pointer", fontFamily: "var(--sans)",
+        }}>
+          ✓ Usar
         </button>
       </div>
     </div>
   );
 }
 
+// ─── SyncedMapView ────────────────────────────────────────────────────────────
+// Solo el mapa, sin botones — los botones están en ModelTable adyacente.
+function SyncedMapView({ accentColor, points, mapRefs, ownIdx }) {
+  const segments = useMemo(() => {
+    const segs = [];
+    for (let i = 0; i < points.length - 1; i++) {
+      const p = points[i];
+      segs.push({
+        pos:   [[p.lat, p.lon], [points[i+1].lat, points[i+1].lon]],
+        color: p._ambiguous ? "#F59E0B" : pointColor(p),
+      });
+    }
+    return segs;
+  }, [points]);
+
+  return (
+    <div style={{ height: "100%", borderRadius: 6, overflow: "hidden",
+                  border: `2px solid ${accentColor}66` }}>
+      <MapContainer center={[-34.7, -58.0]} zoom={9}
+        style={{ height: "100%", width: "100%" }} zoomControl={ownIdx === 0}>
+        <TileLayer attribution="© OpenStreetMap contributors"
+          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+        <MapFitOnce points={points} />
+        <MapSyncController mapRefs={mapRefs} ownIdx={ownIdx} />
+
+        {Object.entries(ZONES).map(([key, z]) => (
+          <Polygon key={key} positions={z.polygon.map(([a,b]) => [a,b])}
+            pathOptions={{ color: z.color, weight: 1, opacity: 0.5,
+                           fillColor: z.color, fillOpacity: 0.06, dashArray: "4,4" }} />
+        ))}
+
+        {segments.map((s, i) => (
+          <Polyline key={`${i}-${s.color}`} positions={s.pos}
+            color={s.color} weight={2.5} opacity={0.85} />
+        ))}
+
+        {points.map((p, i) => {
+          if (p.lat == null || p.lon == null) return null;
+          const isCluster   = p.servicio_num != null;
+          const isAmbiguous = p._ambiguous;
+          const col = isAmbiguous ? "#F59E0B" : pointColor(p);
+
+          if (!isCluster && p.state !== "ZARPE" && p.state !== "LLEGADA") {
+            return <CircleMarker key={i} center={[p.lat, p.lon]} radius={2}
+              color="#ccc" weight={1} fillColor="#ccc" fillOpacity={0.3} />;
+          }
+          const radius = (p.state === "ZARPE" || p.state === "LLEGADA") ? 7
+            : isAmbiguous ? 8 : 6;
+          return (
+            <CircleMarker key={`${i}-${p.servicio_num ?? p.state}`}
+              center={[p.lat, p.lon]} radius={radius}
+              color={isCluster ? "#fff" : col} weight={isCluster ? 1.5 : 2}
+              fillColor={col} fillOpacity={0.95}>
+              <Popup>
+                <div style={{ fontSize: 11 }}>
+                  <strong style={{ color: col }}>
+                    {isAmbiguous ? "⚠ Ambiguo" : isCluster ? `C${p.servicio_num}` : p.state}
+                  </strong><br />
+                  {fmtTime(p.datetime)} {TZ_LABEL} · SOG: {p.sog != null ? `${Number(p.sog).toFixed(1)} kn` : "—"}
+                </div>
+              </Popup>
+            </CircleMarker>
+          );
+        })}
+      </MapContainer>
+    </div>
+  );
+}
+
 // ─── ComparisonMode ───────────────────────────────────────────────────────────
+// Layout: tabla-izquierda | mapa-A | mapa-B | tabla-derecha  (fila superior)
+//         tabla-izquierda | mapa-C | consenso | tabla-derecha (fila inferior)
+//
+// grid: 18% | 32% | 32% | 18%   (columnas)
+//       1fr | 1fr              (filas)
+function ComparisonMode({ rawPoints, onApply, onClose }) {
+  const mapRefs = useRef([null, null, null, null]);
+
+  const resA = useMemo(() => runModelA(rawPoints), [rawPoints]);
+  const resB = useMemo(() => runModelB(rawPoints), [rawPoints]);
+  const resC = useMemo(() => runModelC(rawPoints), [rawPoints]);
+  const { consensusMap } = useMemo(
+    () => buildConsensus(rawPoints, resA, resB, resC),
+    [rawPoints, resA, resB, resC]
+  );
+
+  const ptsA    = useMemo(() => buildPointsFromModelResult(rawPoints, resA, null),       [rawPoints, resA]);
+  const ptsB    = useMemo(() => buildPointsFromModelResult(rawPoints, resB, null),       [rawPoints, resB]);
+  const ptsC    = useMemo(() => buildPointsFromModelResult(rawPoints, resC, null),       [rawPoints, resC]);
+  const ptsCons = useMemo(() => buildPointsFromModelResult(rawPoints, [], consensusMap), [rawPoints, consensusMap]);
+
+  const countA    = new Set(resA.map(r => r.servicio_num)).size;
+  const countB    = new Set(resB.map(r => r.servicio_num)).size;
+  const countC    = new Set(resC.map(r => r.servicio_num)).size;
+  const countCons = new Set([...consensusMap.values()].map(v => v.servicio_num)).size;
+  const ambCount  = [...consensusMap.values()].filter(v => v.ambiguous).length;
+
+  useEffect(() => {
+    const h = e => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [onClose]);
+
+  // Helpers para disparar apply
+  const apply = (result, isCons, editMode) =>
+    onApply(isCons ? null : result, consensusMap, isCons, editMode);
+
+  // Definición de los 4 modelos en orden de grilla:
+  // posición 0 = arriba-izq, 1 = arriba-der, 2 = abajo-izq, 3 = abajo-der
+  const MODELS = [
+    { label: "Modelo A", sublabel: "Conservador",  color: "#1565C0", pts: ptsA,    count: countA,    ambs: 0,        res: resA,  isCons: false },
+    { label: "Modelo B", sublabel: "Literal",       color: "#2E7D32", pts: ptsB,    count: countB,    ambs: 0,        res: resB,  isCons: false },
+    { label: "Modelo C", sublabel: "Geoespacial",   color: "#6A1B9A", pts: ptsC,    count: countC,    ambs: 0,        res: resC,  isCons: false },
+    { label: "Consenso", sublabel: "2 de 3 modelos",color: "#065F46", pts: ptsCons, count: countCons, ambs: ambCount, res: null,  isCons: true  },
+  ];
+
+  const tableProps = (m) => ({
+    accentColor:    m.color,
+    label:          m.label,
+    sublabel:       m.sublabel,
+    clusterCount:   m.count,
+    ambiguousCount: m.ambs,
+    points:         m.pts,
+    onUse:  () => apply(m.res, m.isCons, false),
+    onEdit: () => apply(m.res, m.isCons, true),
+  });
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 9999,
+      background: "#1a2744",
+      display: "flex", flexDirection: "column",
+    }}>
+      {/* ── Header ── */}
+      <div style={{
+        padding: "8px 14px", background: "#213363",
+        display: "flex", alignItems: "center", gap: 10, flexShrink: 0,
+        borderBottom: "1px solid rgba(255,255,255,.1)",
+      }}>
+        <button onClick={onClose} style={{
+          padding: "4px 11px", borderRadius: 5, fontSize: 11,
+          border: "1px solid rgba(255,255,255,.3)", background: "transparent",
+          color: "#fff", cursor: "pointer", fontFamily: "var(--sans)",
+        }}>← Volver</button>
+
+        <span style={{ fontSize: 12, fontWeight: 800, color: "#fff", fontFamily: "var(--sans)" }}>
+          ⚡ Modo comparación
+        </span>
+        <span style={{ fontSize: 9, color: "rgba(255,255,255,.5)", fontFamily: "var(--mono)" }}>
+          3 modelos · mapas sincronizados · elegí cuál usar
+        </span>
+
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
+          {MODELS.map(m => (
+            <span key={m.label} style={{
+              fontSize: 9, fontFamily: "var(--mono)", color: "#fff",
+              background: m.color, padding: "2px 7px", borderRadius: 8, fontWeight: 700,
+            }}>
+              {m.label.replace("Modelo ", "")}: {m.count}
+            </span>
+          ))}
+          {ambCount > 0 && (
+            <span style={{
+              fontSize: 9, color: "#92400E", background: "#FEF3C7",
+              padding: "2px 7px", borderRadius: 8, fontWeight: 700, fontFamily: "var(--mono)",
+            }}>⚠ {ambCount}</span>
+          )}
+        </div>
+      </div>
+
+      {/* ── Body: tabla-A | mapa-A | mapa-B | tabla-B  (row 1)
+                  tabla-C | mapa-C | consenso | tabla-consenso (row 2) ── */}
+      <div style={{
+        flex: 1, minHeight: 0,
+        display: "grid",
+        gridTemplateColumns: "18% 32% 32% 18%",
+        gridTemplateRows:    "1fr 1fr",
+        gap: 6, padding: 6,
+      }}>
+        {/* ROW 1 — left to right */}
+        <div style={{ gridColumn: 1, gridRow: 1 }}><ModelTable {...tableProps(MODELS[0])} /></div>
+        <div style={{ gridColumn: 2, gridRow: 1, minHeight: 0 }}>
+          <SyncedMapView accentColor={MODELS[0].color} points={MODELS[0].pts} mapRefs={mapRefs} ownIdx={0} />
+        </div>
+        <div style={{ gridColumn: 3, gridRow: 1 }}>
+          <SyncedMapView accentColor={MODELS[1].color} points={MODELS[1].pts} mapRefs={mapRefs} ownIdx={1} />
+        </div>
+        <div style={{ gridColumn: 4, gridRow: 1 }}><ModelTable {...tableProps(MODELS[1])} /></div>
+
+        {/* ROW 2 — left to right */}
+        <div style={{ gridColumn: 1, gridRow: 2 }}><ModelTable {...tableProps(MODELS[2])} /></div>
+        <div style={{ gridColumn: 2, gridRow: 2 }}>
+          <SyncedMapView accentColor={MODELS[2].color} points={MODELS[2].pts} mapRefs={mapRefs} ownIdx={2} />
+        </div>
+        <div style={{ gridColumn: 3, gridRow: 2 }}>
+          <SyncedMapView accentColor={MODELS[3].color} points={MODELS[3].pts} mapRefs={mapRefs} ownIdx={3} />
+        </div>
+        <div style={{ gridColumn: 4, gridRow: 2 }}><ModelTable {...tableProps(MODELS[3])} /></div>
+      </div>
+    </div>
+  );
+}
+
+
 // Pantalla fullscreen con grilla 2×2 de mapas sincronizados.
 // rawPoints: puntos originales del viaje (sin asignaciones del modelo)
 // onApply(modelResult, isConsensus): carga el resultado seleccionado
