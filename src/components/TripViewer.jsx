@@ -1068,7 +1068,7 @@ function ModelTable({ points, accentColor, label, sublabel, clusterCount,
   return (
     <div style={{
       display: "flex", flexDirection: "column",
-      background: "#fff", height: "100%",
+      background: "#fff", height: "100%", width: "100%",
       border: `1px solid ${col}44`, borderRadius: 8,
       overflow: "hidden",
     }}>
@@ -1201,7 +1201,7 @@ function SyncedMapView({ accentColor, points, mapRefs, ownIdx }) {
   }, [points]);
 
   return (
-    <div style={{ height: "100%", borderRadius: 6, overflow: "hidden",
+    <div style={{ height: "100%", width: "100%", borderRadius: 6, overflow: "hidden",
                   border: `2px solid ${accentColor}66` }}>
       <MapContainer center={[-34.7, -58.0]} zoom={9}
         style={{ height: "100%", width: "100%" }} zoomControl={ownIdx === 0}>
@@ -1365,24 +1365,24 @@ function ComparisonMode({ rawPoints, onApply, onClose }) {
         gap: 6, padding: 6,
       }}>
         {/* ROW 1 — left to right */}
-        <div style={{ gridColumn: 1, gridRow: 1 }}><ModelTable {...tableProps(MODELS[0])} /></div>
-        <div style={{ gridColumn: 2, gridRow: 1, minHeight: 0 }}>
+        <div style={{ gridColumn: 1, gridRow: 1, minHeight: 0, overflow: "hidden" }}><ModelTable {...tableProps(MODELS[0])} /></div>
+        <div style={{ gridColumn: 2, gridRow: 1, minHeight: 0, overflow: "hidden" }}>
           <SyncedMapView accentColor={MODELS[0].color} points={MODELS[0].pts} mapRefs={mapRefs} ownIdx={0} />
         </div>
-        <div style={{ gridColumn: 3, gridRow: 1 }}>
+        <div style={{ gridColumn: 3, gridRow: 1, minHeight: 0, overflow: "hidden" }}>
           <SyncedMapView accentColor={MODELS[1].color} points={MODELS[1].pts} mapRefs={mapRefs} ownIdx={1} />
         </div>
-        <div style={{ gridColumn: 4, gridRow: 1 }}><ModelTable {...tableProps(MODELS[1])} /></div>
+        <div style={{ gridColumn: 4, gridRow: 1, minHeight: 0, overflow: "hidden" }}><ModelTable {...tableProps(MODELS[1])} /></div>
 
         {/* ROW 2 — left to right */}
-        <div style={{ gridColumn: 1, gridRow: 2 }}><ModelTable {...tableProps(MODELS[2])} /></div>
-        <div style={{ gridColumn: 2, gridRow: 2 }}>
+        <div style={{ gridColumn: 1, gridRow: 2, minHeight: 0, overflow: "hidden" }}><ModelTable {...tableProps(MODELS[2])} /></div>
+        <div style={{ gridColumn: 2, gridRow: 2, minHeight: 0, overflow: "hidden" }}>
           <SyncedMapView accentColor={MODELS[2].color} points={MODELS[2].pts} mapRefs={mapRefs} ownIdx={2} />
         </div>
-        <div style={{ gridColumn: 3, gridRow: 2 }}>
+        <div style={{ gridColumn: 3, gridRow: 2, minHeight: 0, overflow: "hidden" }}>
           <SyncedMapView accentColor={MODELS[3].color} points={MODELS[3].pts} mapRefs={mapRefs} ownIdx={3} />
         </div>
-        <div style={{ gridColumn: 4, gridRow: 2 }}><ModelTable {...tableProps(MODELS[3])} /></div>
+        <div style={{ gridColumn: 4, gridRow: 2, minHeight: 0, overflow: "hidden" }}><ModelTable {...tableProps(MODELS[3])} /></div>
       </div>
     </div>
   );
