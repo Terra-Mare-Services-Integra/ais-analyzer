@@ -750,3 +750,114 @@ export function buildConsensus(points, resA, resB, resC) {
 export function countModelServices(modelResult) {
   return new Set(modelResult.map(r => r.servicio_num)).size;
 }
+
+// ─── PROJECTED AGGREGATION ────────────────────────────────────────────────────
+/**
+ * aggregateProjected(trips, modelKey)
+ *
+ * Combina datos reales de viajes validados con estimaciones automáticas de
+ * viajes pendientes usando uno de los 3 modelos (o el consenso).
+ *
+ * modelKey: "A" | "B" | "C" | "cons"
+ *
+ * Retorna la misma forma que aggregateKPIs pero con dos fuentes:
+ *   - validatedServices: servicios reales (de viajes validated=true)
+ *   - projectedServices: servicios estimados (de viajes validated=false)
+ *   - totalServices: suma de ambos
+ *   - ops: suma de ambas fuentes por tipo
+ *   - opsValidated: solo los reales
+ *   - opsProjected: solo los estimados
+ */
+export function aggregateProjected(trips, modelKey) {
+  const emptyOps = () => ({
+    agua_zc:0, slop_zc:0, lub_zc:0, alijo_zc:0, alijo_za:0, alijo_zd:0,
+  });
+
+  const opsVal  = emptyOps();
+  const opsPrj  = emptyOps();
+  let   svcVal  = 0;
+  let   svcPrj  = 0;
+
+  // Helper: sumar tipo_servicio de un grupo de puntos al ops destino
+  const addGroup = (pts, opsTarget) => {
+    const typeCount = {};
+    for (const pt of pts) {
+      const t = pt?.tipo_servicio;
+      if (t && t !== "SIN_CLASIFICAR" && t !== "BORRADO")
+        typeCount[t] = (typeCount[t] || 0) + 1;
+    }
+    const dominant = Object.entries(typeCount).sort((a,b)=>b[1]-a[1])[0]?.[0];
+    if (dominant) {
+      const plRow = SERVICE_TYPES[dominant]?.plRow;
+      if (plRow && opsTarget[plRow] !== undefined) opsTarget[plRow]++;
+    }
+  };
+
+  for (const trip of trips) {
+    if (!trip.points?.length) continue;
+
+    if (trip.validated) {
+      // ── Viaje validado: usar clasificación manual (servicio_num) ──────────
+      const byNum = {};
+      for (const pt of trip.points) {
+        if (pt.servicio_num == null) continue;
+        if (!byNum[pt.servicio_num]) byNum[pt.servicio_num] = [];
+        byNum[pt.servicio_num].push(pt);
+      }
+      for (const pts of Object.values(byNum)) {
+        svcVal++;
+        addGroup(pts, opsVal);
+      }
+    } else {
+      // ── Viaje pendiente: estimar con el modelo elegido ────────────────────
+      let modelResult;
+      if (modelKey === "A")    modelResult = runModelA(trip.points);
+      else if (modelKey === "B") modelResult = runModelB(trip.points);
+      else if (modelKey === "C") modelResult = runModelC(trip.points);
+      else {
+        // consenso
+        const rA = runModelA(trip.points);
+        const rB = runModelB(trip.points);
+        const rC = runModelC(trip.points);
+        const cMap = buildConsensus(trip.points, rA, rB, rC);
+        // Convertir consensusMap a groups
+        const byNum = {};
+        cMap.forEach(({ servicio_num }, origIdx) => {
+          if (!byNum[servicio_num]) byNum[servicio_num] = [];
+          byNum[servicio_num].push(trip.points[origIdx]);
+        });
+        for (const pts of Object.values(byNum)) {
+          svcPrj++;
+          addGroup(pts, opsPrj);
+        }
+        continue; // ya procesado
+      }
+
+      // Para modelos A/B/C: groupear por servicio_num del resultado
+      const byNum = {};
+      for (const { origIdx, servicio_num } of modelResult) {
+        if (!byNum[servicio_num]) byNum[servicio_num] = [];
+        byNum[servicio_num].push(trip.points[origIdx]);
+      }
+      for (const pts of Object.values(byNum)) {
+        svcPrj++;
+        addGroup(pts, opsPrj);
+      }
+    }
+  }
+
+  // Combinar
+  const ops = emptyOps();
+  for (const k of Object.keys(ops)) {
+    ops[k] = opsVal[k] + opsPrj[k];
+  }
+
+  return {
+    validatedServices: svcVal,
+    projectedServices: svcPrj,
+    totalServices:     svcVal + svcPrj,
+    ops,
+    opsValidated: opsVal,
+    opsProjected: opsPrj,
+  };
+}
