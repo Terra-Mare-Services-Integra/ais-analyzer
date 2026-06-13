@@ -10,7 +10,7 @@ const SVC_ROWS = [
   { key:"alijo_za", label:"Alijo — Zona Alfa",  color:"#673AB7" },
   { key:"alijo_zd", label:"Alijo — Zona Delta", color:"#3F51B5" },
 ];
-
+A
 const MODEL_COLS = [
   { key:"A",    label:"Modelo A", sub:"Conservador",  color:"#1565C0" },
   { key:"B",    label:"Modelo B", sub:"Literal",      color:"#2E7D32" },
@@ -306,6 +306,8 @@ function CalibrationTable({ calib }) {
 // Sección educativa al pie del dashboard. Explica cada modelo con el viaje 8
 // como ejemplo real (datos extraídos del modo comparación).
 function ModelExplainer() {
+  // Datos reales extraídos del Modo Comparación — Viaje #8 — 21/08/24
+  // Punto clave: 00:24 con SOG 8.5kn — cada modelo lo interpreta distinto
   const VIAJE8 = {
     id: 8,
     rango: "21/08/24 15:04 → 22/08/24 18:11 ART (1d 3h)",
@@ -313,34 +315,68 @@ function ModelExplainer() {
       {
         key: "A", label: "Modelo A", sub: "Conservador", color: "#1565C0",
         clusters: 7,
-        logica: "Si el gap entre dos paradas es menor a 60 min, las fusiona en un mismo servicio. Puntos con SOG alto dentro de zona se absorben al cluster anterior.",
-        ejemplo: "Detecta 7 clusters. Fusiona agresivamente: el período 23:38→02:09 (casi 3hs con gaps internos) queda como un solo C4 porque los gaps entre puntos son menores a 60min.",
-        pros: "Útil cuando el barco hace múltiples contactos rápidos con el mismo buque.",
-        cons: "Puede sobrecontar si hay servicios distintos separados por menos de 60 min.",
+        // C1(18:16/19:09) C2(20:36/21:01) C3(22:12) C4(23:38/00:24/01:13/02:09) C5(03:00) C6(04:19) C7(05:19/06:00)
+        detalle: [
+          { c:"C1", horas:"18:16 / 19:09" },
+          { c:"C2", horas:"20:36 / 21:01" },
+          { c:"C3", horas:"22:12" },
+          { c:"C4", horas:"23:38 / 00:24 / 01:13 / 02:09", destaca: true },
+          { c:"C5", horas:"03:00" },
+          { c:"C6", horas:"04:19" },
+          { c:"C7", horas:"05:19 / 06:00" },
+        ],
+        logica: "Fusiona agresivamente: si el gap entre dos paradas es < 60 min, las une en el mismo cluster. Los puntos con SOG alto dentro de zona se absorben al cluster precedente.",
+        ejemplo: "El punto de las 00:24 (SOG 8.5kn) queda dentro de C4 porque el gap con 23:38 es < 60min. Resultado: 7 clusters — el más fragmentado.",
+        pros: "Capta múltiples contactos rápidos con el mismo buque sin perder ninguno.",
+        cons: "Sobreestima si dos servicios distintos ocurren con menos de 60 min de separación.",
       },
       {
         key: "B", label: "Modelo B", sub: "Literal", color: "#2E7D32",
         clusters: 3,
-        logica: "Solo marca como cluster los puntos con SOG < 4 kn. Corta el cluster si el gap supera 90 min o si el barco se aleja más de 0.5nm del centroide del grupo.",
-        ejemplo: "Detecta 3 clusters. Agrupa todo el período 18:16→21:01 como C1 (gap < 90min), luego 22:12/23:38 como C2, y el bloque nocturno 01:13→05:19 como C3.",
-        pros: "Comportamiento predecible, basado estrictamente en velocidad. Es el algoritmo actual del sistema.",
-        cons: "Puede fusionar servicios distintos que estuvieron seguidos sin pausa larga.",
+        // C1(18:16/19:09/20:36/21:01) C2(22:12/23:38) C3(01:13/03:00/04:19/05:19)
+        detalle: [
+          { c:"C1", horas:"18:16 / 19:09 / 20:36 / 21:01" },
+          { c:"C2", horas:"22:12 / 23:38" },
+          { c:"C3", horas:"01:13 / 03:00 / 04:19 / 05:19", destaca: true },
+        ],
+        logica: "Solo agrupa puntos con SOG < 4 kn. Corta el cluster si el gap supera 90 min o si el barco se aleja > 0.5nm del centroide del grupo.",
+        ejemplo: "El punto de las 00:24 (SOG 8.5kn) es ignorado — no cumple el umbral. El bloque 01:13→05:19 queda como un solo C3 porque los gaps internos son < 90min.",
+        pros: "Comportamiento predecible y auditable. Es el algoritmo base del sistema.",
+        cons: "Fusiona en C3 lo que probablemente son 4 servicios distintos en posiciones diferentes.",
       },
       {
         key: "C", label: "Modelo C", sub: "Geoespacial", color: "#6A1B9A",
         clusters: 6,
-        logica: "Ignora el tiempo completamente. Agrupa puntos que estén a menos de 500m entre sí dentro de zona, sin importar el gap temporal.",
-        ejemplo: "Detecta 6 clusters. Separa más que B porque los puntos de las 22:12 y las 01:13 están físicamente en lugares distintos, aunque B los hubiera agrupado por proximidad temporal.",
-        pros: "Excelente para detectar servicios a distintos buques en posiciones diferentes.",
-        cons: "Puede crear clusters falsos si el barco se aleja momentáneamente y vuelve.",
+        // C1(18:16/19:09/20:36/21:01) C2(22:12/23:38) C3(00:24) C4(01:13/02:09) C5(03:09/04:19/05:19) C6(06:00)
+        detalle: [
+          { c:"C1", horas:"18:16 / 19:09 / 20:36 / 21:01" },
+          { c:"C2", horas:"22:12 / 23:38" },
+          { c:"C3", horas:"00:24", destaca: true },
+          { c:"C4", horas:"01:13 / 02:09" },
+          { c:"C5", horas:"03:09 / 04:19 / 05:19" },
+          { c:"C6", horas:"06:00" },
+        ],
+        logica: "Ignora el tiempo. Agrupa puntos que estén a < 500m entre sí dentro de zona, sin importar cuánto tiempo pasó entre ellos.",
+        ejemplo: "El punto de las 00:24 (SOG 8.5kn) queda como C3 propio porque está geográficamente separado de los puntos anteriores y posteriores. 6 clusters — mismo resultado que el Consenso.",
+        pros: "Detecta servicios a distintos buques en posiciones distintas aunque estén temporalmente cercanos.",
+        cons: "Un desvío momentáneo del barco puede crear un cluster falso si vuelve al mismo punto.",
       },
       {
         key: "cons", label: "Consenso", sub: "2 de 3 modelos", color: "#065F46",
         clusters: 6,
-        logica: "Para cada par de puntos, cuenta en cuántos modelos aparecen agrupados juntos. Si ≥ 2 de 3 coinciden, van al mismo cluster. Si los 3 difieren, el punto queda marcado como ambiguo ⚠.",
-        ejemplo: "Detecta 6 clusters — coincide con Modelo C. El período 23:38→02:09 que A agrupa en 1 y B/C separan, termina siendo separado porque 2 de 3 modelos lo dividen.",
-        pros: "Reduce el impacto de un modelo mal calibrado. El resultado suele ser el más robusto.",
-        cons: "Si los 3 modelos difieren sistemáticamente, muchos puntos quedan como ambiguos.",
+        // Igual a C — vota con B y C contra A en el bloque nocturno
+        detalle: [
+          { c:"C1", horas:"18:16 / 19:09 / 20:36 / 21:01" },
+          { c:"C2", horas:"22:12 / 23:38" },
+          { c:"C3", horas:"00:24", destaca: true },
+          { c:"C4", horas:"01:13 / 02:09" },
+          { c:"C5", horas:"03:09 / 04:19 / 05:19" },
+          { c:"C6", horas:"06:00" },
+        ],
+        logica: "Para cada par de puntos, cuenta en cuántos modelos aparecen juntos. Si ≥ 2 de 3 coinciden → mismo cluster. Si los 3 difieren → punto ambiguo ⚠.",
+        ejemplo: "Coincide con Modelo C (6 clusters). El 00:24 que A fusiona con C4 queda separado porque B y C lo tratan distinto — 2 votos ganan. Ningún punto ambiguo en este viaje.",
+        pros: "Reduce el impacto de un modelo mal calibrado. Resultado más robusto que cualquier modelo solo.",
+        cons: "Si los 3 modelos sistemáticamente difieren (dataset atípico), muchos puntos quedan como ambiguos ⚠.",
       },
     ],
   };
@@ -393,42 +429,63 @@ function ModelExplainer() {
 
             {/* Card body */}
             <div style={{padding:"10px 14px",display:"flex",flexDirection:"column",gap:8}}>
+
               {/* Lógica */}
               <div>
                 <div style={{fontSize:8,fontWeight:700,color:"#6381A7",
                              textTransform:"uppercase",letterSpacing:".8px",
-                             fontFamily:"var(--mono)",marginBottom:3}}>
-                  Lógica
-                </div>
-                <div style={{fontSize:11,color:"#213363",lineHeight:1.6}}>
-                  {m.logica}
-                </div>
+                             fontFamily:"var(--mono)",marginBottom:3}}>Lógica</div>
+                <div style={{fontSize:11,color:"#213363",lineHeight:1.6}}>{m.logica}</div>
               </div>
 
-              {/* Ejemplo */}
-              <div style={{background:`${m.color}08`,borderRadius:6,
-                           padding:"8px 10px",borderLeft:`2px solid ${m.color}44`}}>
+              {/* Detalle de clusters del viaje 8 + explicación */}
+              <div style={{background:`${m.color}07`,borderRadius:6,
+                           padding:"8px 10px",borderLeft:`2px solid ${m.color}55`}}>
                 <div style={{fontSize:8,fontWeight:700,color:m.color,
                              textTransform:"uppercase",letterSpacing:".8px",
-                             fontFamily:"var(--mono)",marginBottom:3}}>
-                  Viaje {VIAJE8.id} — resultado
+                             fontFamily:"var(--mono)",marginBottom:6}}>
+                  Viaje {VIAJE8.id} — {m.clusters} cluster{m.clusters!==1?"s":""}
                 </div>
-                <div style={{fontSize:11,color:"#213363",lineHeight:1.6}}>
+                {/* Mini tabla de clusters */}
+                <div style={{display:"flex",flexDirection:"column",gap:2,marginBottom:7}}>
+                  {m.detalle.map(d => (
+                    <div key={d.c} style={{
+                      display:"flex",alignItems:"center",gap:6,
+                      padding:"2px 5px",borderRadius:4,
+                      background: d.destaca ? `${m.color}18` : "transparent",
+                    }}>
+                      <span style={{
+                        fontSize:9,fontWeight:800,fontFamily:"var(--mono)",
+                        color: d.destaca ? m.color : "#6381A7",
+                        width:22,flexShrink:0,
+                      }}>{d.c}</span>
+                      <span style={{fontSize:9,fontFamily:"var(--mono)",
+                                    color: d.destaca ? "#213363" : "#A5B5CC"}}>
+                        {d.horas}
+                      </span>
+                      {d.destaca && (
+                        <span style={{fontSize:8,color:m.color,fontWeight:600,marginLeft:"auto"}}>
+                          ← clave
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                <div style={{fontSize:10,color:"#213363",lineHeight:1.5,
+                             borderTop:`1px solid ${m.color}22`,paddingTop:6}}>
                   {m.ejemplo}
                 </div>
               </div>
 
               {/* Pros / Cons */}
               <div style={{display:"flex",gap:8}}>
-                <div style={{flex:1,background:"#F0FDF4",borderRadius:5,
-                             padding:"6px 8px"}}>
+                <div style={{flex:1,background:"#F0FDF4",borderRadius:5,padding:"6px 8px"}}>
                   <div style={{fontSize:8,fontWeight:700,color:"#1E7A4A",
                                textTransform:"uppercase",fontFamily:"var(--mono)",
                                marginBottom:2}}>✓ Útil cuando</div>
                   <div style={{fontSize:10,color:"#1E7A4A",lineHeight:1.5}}>{m.pros}</div>
                 </div>
-                <div style={{flex:1,background:"#FFF7ED",borderRadius:5,
-                             padding:"6px 8px"}}>
+                <div style={{flex:1,background:"#FFF7ED",borderRadius:5,padding:"6px 8px"}}>
                   <div style={{fontSize:8,fontWeight:700,color:"#92400E",
                                textTransform:"uppercase",fontFamily:"var(--mono)",
                                marginBottom:2}}>⚠ Ojo con</div>
