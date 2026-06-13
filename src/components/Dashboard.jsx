@@ -1,5 +1,5 @@
-import { useState, useMemo } from "react";
-import { aggregateKPIs, aggregateProjected } from "../lib/ais_engine";
+import { useMemo } from "react";
+import { aggregateKPIs, aggregateCalibration } from "../lib/ais_engine";
 
 // ─── CONSTANTES ───────────────────────────────────────────────────────────────
 const SVC_ROWS = [
@@ -11,21 +11,18 @@ const SVC_ROWS = [
   { key:"alijo_zd", label:"Alijo — Zona Delta", color:"#3F51B5" },
 ];
 
-// Tabs de proyección — orden = secuencia de tabs
-const PROJ_TABS = [
-  { key:"validated", label:"Validado",         sub:"solo manual",     color:"#1E7A4A", badge:"✓" },
-  { key:"A",         label:"+ Modelo A",        sub:"conservador",     color:"#1565C0", badge:"A" },
-  { key:"B",         label:"+ Modelo B",        sub:"literal",         color:"#2E7D32", badge:"B" },
-  { key:"C",         label:"+ Modelo C",        sub:"geoespacial",     color:"#6A1B9A", badge:"C" },
-  { key:"cons",      label:"+ Consenso",        sub:"2 de 3 modelos",  color:"#065F46", badge:"≡" },
+const MODEL_COLS = [
+  { key:"A",    label:"Modelo A", sub:"Conservador",  color:"#1565C0" },
+  { key:"B",    label:"Modelo B", sub:"Literal",      color:"#2E7D32" },
+  { key:"C",    label:"Modelo C", sub:"Geoespacial",  color:"#6A1B9A" },
+  { key:"cons", label:"Consenso", sub:"2 de 3",       color:"#065F46" },
 ];
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 function fmtDateRange(trips) {
   if (!trips?.length) return null;
   const times = trips
-    .flatMap(t => [t.dateStart, t.dateEnd])
-    .filter(Boolean)
+    .flatMap(t => [t.dateStart, t.dateEnd]).filter(Boolean)
     .map(d => d instanceof Date ? d.getTime() : new Date(d).getTime());
   if (!times.length) return null;
   const fmt = ms => {
@@ -64,194 +61,281 @@ function EmptyDashboard({ onGoUpload }) {
   );
 }
 
-// ─── PROJECTION TABS ─────────────────────────────────────────────────────────
-function ProjectionTabs({ active, onChange, pendingTrips }) {
-  return (
-    <div style={{display:"flex",gap:0,marginBottom:16,
-                 border:"1px solid #D6E0ED",borderRadius:9,overflow:"hidden",
-                 background:"#F8FAFC"}}>
-      {PROJ_TABS.map((t, i) => {
-        const isActive = active === t.key;
-        const isFirst  = i === 0;
-        const showProj = !isFirst && pendingTrips > 0;
-        return (
-          <button key={t.key} onClick={() => onChange(t.key)}
-            style={{
-              flex: 1, padding:"9px 6px", border:"none",
-              borderRight: i < PROJ_TABS.length-1 ? "1px solid #D6E0ED" : "none",
-              background: isActive ? t.color : "transparent",
-              cursor:"pointer", transition:"background .15s",
-              display:"flex",flexDirection:"column",alignItems:"center",gap:2,
-            }}>
-            <span style={{
-              fontSize:10,fontWeight:800,fontFamily:"var(--sans)",
-              color: isActive ? "#fff" : t.color,
-            }}>
-              {t.badge} {t.label}
-            </span>
-            <span style={{fontSize:8,fontFamily:"var(--mono)",
-                          color: isActive ? "rgba(255,255,255,.7)" : "#A5B5CC"}}>
-              {isFirst ? t.sub : (showProj ? `${pendingTrips} pendientes` : "sin pendientes")}
-            </span>
-          </button>
-        );
-      })}
-    </div>
-  );
-}
+// ─── CALIBRATION TABLE ────────────────────────────────────────────────────────
+// Tabla principal del dashboard.
+// Filas:
+//   1. "Detectado en todos"      — modelo sobre todos los viajes
+//   2. "- En viajes validados"   — modelo sobre solo los validados
+//   3. "= Sin catalogar"         — pendientes reales (fila 1 - fila 2)
+//   separator
+//   4..N. tipos de servicio      — clasificación manual (igual en todas las cols)
+//   separator
+//   TOTAL                        — sin catalogar + servicios reales
+//   Error vs real                — fila 2 - realValidated (delta de calibración)
+function CalibrationTable({ calib }) {
+  const { models, realValidated, opsValidated } = calib;
 
-// ─── BREAKDOWN DE OPERACIONES ─────────────────────────────────────────────────
-// Muestra barras por tipo de servicio con split validado/proyectado.
-function OpsBreakdown({ proj, isValidatedOnly, accentColor }) {
-  const maxVal = Math.max(...SVC_ROWS.map(s => proj.ops[s.key]), 1);
+  // Mejor modelo = menor |error|
+  const bestKey = MODEL_COLS
+    .map(m => ({ key: m.key, absErr: Math.abs(models[m.key].error) }))
+    .sort((a, b) => a.absErr - b.absErr)[0]?.key;
+
+  const th = (content, color, extra = {}) => (
+    <th style={{
+      padding:"7px 10px", fontSize:9, fontWeight:700,
+      textTransform:"uppercase", letterSpacing:".6px",
+      fontFamily:"var(--mono)", textAlign:"center",
+      color: color ?? "#6381A7",
+      borderLeft:"1px solid #EEF2F7",
+      background: color ? `${color}0A` : "#F8FAFC",
+      whiteSpace:"nowrap",
+      ...extra,
+    }}>{content}</th>
+  );
+
+  const tdVal = (val, color, extra = {}) => (
+    <td style={{
+      padding:"6px 10px", textAlign:"center",
+      fontFamily:"var(--mono)", fontSize:12, fontWeight:700,
+      color: val === 0 ? "#D6E0ED" : (color ?? "#213363"),
+      borderLeft:"1px solid #EEF2F7",
+      ...extra,
+    }}>{val}</td>
+  );
+
+  const SepRow = ({ label }) => (
+    <tr>
+      <td colSpan={MODEL_COLS.length + 1}
+        style={{padding:"0 14px",height:1,background:"#D6E0ED",fontSize:0}}>
+      </td>
+    </tr>
+  );
 
   return (
     <div style={{background:"#fff",border:"1px solid #D6E0ED",borderRadius:10,
-                 overflow:"hidden",marginBottom:16}}>
+                 overflow:"hidden",marginBottom:20}}>
+
       {/* Header */}
       <div style={{padding:"10px 16px",borderBottom:"1px solid #EEF2F7",
                    display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-        <span style={{fontFamily:"var(--mono)",fontSize:9,fontWeight:600,color:"#6381A7",
-                      textTransform:"uppercase",letterSpacing:1}}>
-          Operaciones por tipo de servicio
-        </span>
-        <div style={{display:"flex",gap:10,alignItems:"center"}}>
-          {!isValidatedOnly && (
-            <>
-              <span style={{display:"flex",alignItems:"center",gap:4,fontSize:9,color:"#1E7A4A"}}>
-                <span style={{width:8,height:8,borderRadius:2,background:"#1E7A4A",
-                              display:"inline-block"}}/>
-                {proj.validatedServices} validados
-              </span>
-              <span style={{display:"flex",alignItems:"center",gap:4,fontSize:9,color:accentColor}}>
-                <span style={{width:8,height:8,borderRadius:2,background:accentColor,
-                              opacity:.5,display:"inline-block"}}/>
-                {proj.projectedServices} estimados
-              </span>
-            </>
-          )}
-          {isValidatedOnly && (
-            <span style={{fontSize:9,color:"#A5B5CC",fontFamily:"var(--mono)"}}>
-              solo clasificación manual
-            </span>
-          )}
+        <div>
+          <span style={{fontFamily:"var(--mono)",fontSize:9,fontWeight:600,color:"#6381A7",
+                        textTransform:"uppercase",letterSpacing:1}}>
+            Calibración de modelos — servicios detectados
+          </span>
+          <span style={{fontSize:9,color:"#A5B5CC",marginLeft:10,fontFamily:"var(--mono)"}}>
+            {realValidated} servicios reales validados
+          </span>
         </div>
+        {bestKey && (
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            <span style={{fontSize:9,color:"#6381A7",fontFamily:"var(--mono)"}}>mejor ajuste:</span>
+            <span style={{
+              fontSize:9,fontWeight:700,fontFamily:"var(--mono)",
+              color: MODEL_COLS.find(m=>m.key===bestKey)?.color,
+              background: `${MODEL_COLS.find(m=>m.key===bestKey)?.color}15`,
+              padding:"2px 8px",borderRadius:8,
+            }}>
+              {MODEL_COLS.find(m=>m.key===bestKey)?.label}
+            </span>
+          </div>
+        )}
       </div>
 
-      {/* Filas por tipo */}
-      {SVC_ROWS.map((s, idx) => {
-        const total   = proj.ops[s.key];
-        const valPart = proj.opsValidated?.[s.key] ?? 0;
-        const prjPart = proj.opsProjected?.[s.key] ?? 0;
-        const barPct  = maxVal > 0 ? (total / maxVal) * 100 : 0;
-        const valPct  = total > 0 ? (valPart / total) * 100 : 0;
+      {/* Tabla */}
+      <div style={{overflowX:"auto"}}>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+          <colgroup>
+            <col style={{width:"32%"}}/>
+            {MODEL_COLS.map(m => <col key={m.key} style={{width:`${68/MODEL_COLS.length}%`}}/>)}
+          </colgroup>
+          <thead>
+            <tr style={{borderBottom:"2px solid #EEF2F7"}}>
+              {th("", null, {borderLeft:"none",textAlign:"left"})}
+              {MODEL_COLS.map(m => (
+                <th key={m.key} style={{
+                  padding:"8px 10px",fontSize:9,fontWeight:700,
+                  textTransform:"uppercase",letterSpacing:".6px",
+                  fontFamily:"var(--mono)",textAlign:"center",
+                  color: m.color,
+                  borderLeft:"1px solid #EEF2F7",
+                  background:`${m.color}0A`,
+                  whiteSpace:"nowrap",
+                }}>
+                  {m.label}
+                  {m.key === bestKey && (
+                    <span style={{marginLeft:4,fontSize:8,background:m.color,
+                                  color:"#fff",padding:"1px 4px",borderRadius:4}}>
+                      ★
+                    </span>
+                  )}
+                  <br/>
+                  <span style={{fontSize:8,fontWeight:400,opacity:.6}}>{m.sub}</span>
+                </th>
+              ))}
+            </tr>
+          </thead>
 
-        return (
-          <div key={s.key}
-            style={{display:"flex",alignItems:"center",gap:12,padding:"9px 16px",
-                    borderBottom:idx<SVC_ROWS.length-1?"1px solid #F5F7FA":"none"}}>
-            <div style={{width:160,fontSize:11,color:"#6381A7",flexShrink:0}}>{s.label}</div>
-            {/* Barra con split validado/estimado */}
-            <div style={{flex:1,height:7,background:"#EEF2F7",borderRadius:4,overflow:"hidden"}}>
-              <div style={{width:`${barPct}%`,height:"100%",borderRadius:4,
-                           display:"flex",overflow:"hidden",
-                           transition:"width .4s ease",minWidth:total>0?4:0}}>
-                {/* Parte validada (color sólido) */}
-                <div style={{width:`${valPct}%`,height:"100%",background:s.color,flexShrink:0}}/>
-                {/* Parte estimada (color semi-transparente) */}
-                <div style={{flex:1,height:"100%",background:s.color,opacity:.35}}/>
-              </div>
-            </div>
-            {/* Números: total (val+prj) */}
-            <div style={{width:36,textAlign:"right",flexShrink:0}}>
-              <span style={{fontFamily:"var(--mono)",fontSize:13,fontWeight:700,
-                            color:total>0?s.color:"#D6E0ED"}}>
-                {total}
-              </span>
-              {!isValidatedOnly && prjPart > 0 && (
-                <span style={{fontFamily:"var(--mono)",fontSize:9,color:"#A5B5CC",display:"block"}}>
-                  +{prjPart}~
+          <tbody>
+            {/* Fila 1: Detectado en todos los viajes */}
+            <tr style={{background:"#F8FAFC",borderBottom:"1px solid #F0F4F9"}}>
+              <td style={{padding:"7px 14px",fontSize:11,color:"#213363",fontWeight:600}}>
+                Detectado en todos los viajes
+              </td>
+              {MODEL_COLS.map(m => tdVal(models[m.key].detectedAll, m.color))}
+            </tr>
+
+            {/* Fila 2: Detectado en viajes validados (por el modelo) */}
+            <tr style={{background:"#fff",borderBottom:"1px solid #F0F4F9"}}>
+              <td style={{padding:"7px 14px 7px 22px",fontSize:11,color:"#6381A7"}}>
+                <span style={{color:"#A5B5CC",marginRight:4}}>−</span>
+                Detectado en viajes validados
+              </td>
+              {MODEL_COLS.map(m => tdVal(models[m.key].detectedValidated, "#6381A7"))}
+            </tr>
+
+            {/* Fila 3: Sin catalogar */}
+            <tr style={{background:"#FFFBEB",borderBottom:"2px solid #D6E0ED"}}>
+              <td style={{padding:"7px 14px 7px 22px",fontSize:11,color:"#92400E",fontWeight:700,
+                           borderLeft:"3px solid #F59E0B"}}>
+                <span style={{marginRight:4}}>= </span>
+                Sin catalogar (pendientes)
+              </td>
+              {MODEL_COLS.map(m => (
+                <td key={m.key} style={{
+                  padding:"6px 10px",textAlign:"center",
+                  fontFamily:"var(--mono)",fontSize:12,fontWeight:700,
+                  color: models[m.key].uncatalogued === 0 ? "#D6E0ED" : "#92400E",
+                  borderLeft:"1px solid #EEF2F7",
+                  background:"#FFFBEB",
+                }}>
+                  {models[m.key].uncatalogued}
+                </td>
+              ))}
+            </tr>
+
+            {/* Tipos de servicio validados (igual en todas las columnas) */}
+            {SVC_ROWS.map((s, idx) => {
+              const val = opsValidated[s.key] ?? 0;
+              return (
+                <tr key={s.key} style={{
+                  borderBottom: idx < SVC_ROWS.length-1 ? "1px solid #F5F7FA" : "2px solid #D6E0ED",
+                  borderLeft:`3px solid ${val > 0 ? s.color : "transparent"}`,
+                }}>
+                  <td style={{padding:"6px 14px",fontSize:11,color: val>0 ? "#213363" : "#C4CADC"}}>
+                    {s.label}
+                  </td>
+                  {MODEL_COLS.map(m => (
+                    <td key={m.key} style={{
+                      padding:"6px 10px",textAlign:"center",
+                      fontFamily:"var(--mono)",fontSize:12,fontWeight:700,
+                      color: val > 0 ? s.color : "#D6E0ED",
+                      borderLeft:"1px solid #EEF2F7",
+                    }}>
+                      {val}
+                    </td>
+                  ))}
+                </tr>
+              );
+            })}
+          </tbody>
+
+          <tfoot>
+            {/* TOTAL */}
+            <tr style={{background:"#F8FAFC",borderTop:"2px solid #D6E0ED"}}>
+              <td style={{padding:"7px 14px",fontSize:10,fontWeight:700,
+                           color:"#213363",fontFamily:"var(--mono)"}}>
+                TOTAL SERVICIOS
+              </td>
+              {MODEL_COLS.map(m => (
+                <td key={m.key} style={{
+                  padding:"7px 10px",textAlign:"center",
+                  fontFamily:"var(--mono)",fontSize:14,fontWeight:800,
+                  color: models[m.key].total > 0 ? m.color : "#D6E0ED",
+                  borderLeft:"1px solid #D6E0ED",
+                  background:`${m.color}06`,
+                }}>
+                  {models[m.key].total}
+                </td>
+              ))}
+            </tr>
+
+            {/* Error de calibración */}
+            <tr style={{background:"#F8FAFC",borderTop:"1px solid #EEF2F7"}}>
+              <td style={{padding:"6px 14px",fontSize:9,color:"#6381A7",fontFamily:"var(--mono)"}}>
+                Error en validados (modelo − real)
+                <span style={{marginLeft:6,color:"#A5B5CC"}}>
+                  real = {realValidated}
                 </span>
-              )}
-            </div>
-          </div>
-        );
-      })}
+              </td>
+              {MODEL_COLS.map(m => {
+                const err = models[m.key].error;
+                const col = err === 0 ? "#1E7A4A"
+                  : Math.abs(err) <= 2 ? "#F59E0B"
+                  : "#DC2626";
+                return (
+                  <td key={m.key} style={{
+                    padding:"6px 10px",textAlign:"center",
+                    fontFamily:"var(--mono)",fontSize:11,fontWeight:700,
+                    color: col,
+                    borderLeft:"1px solid #EEF2F7",
+                  }}>
+                    {err === 0 ? "✓ 0" : err > 0 ? `+${err}` : `${err}`}
+                  </td>
+                );
+              })}
+            </tr>
+          </tfoot>
+        </table>
+      </div>
 
-      {/* Pie: sin clasificar */}
-      {(()=>{
-        const classified = SVC_ROWS.reduce((s,r) => s + proj.ops[r.key], 0);
-        const unc = proj.totalServices - classified;
-        if (unc <= 0) return null;
-        return (
-          <div style={{padding:"8px 16px",background:"#FAFAFA",fontSize:11,
-                       color:"#9E9E9E",fontFamily:"var(--mono)",borderTop:"1px solid #EEF2F7"}}>
-            + {unc} servicio{unc>1?"s":""} sin clasificar
-          </div>
-        );
-      })()}
+      {/* Leyenda */}
+      <div style={{padding:"7px 14px",background:"#F8FAFC",borderTop:"1px solid #EEF2F7",
+                   fontSize:9,color:"#A5B5CC",fontFamily:"var(--mono)",
+                   display:"flex",gap:16,flexWrap:"wrap"}}>
+        <span>★ = modelo con menor error vs clasificación manual</span>
+        <span>Error + = sobreestima · Error − = subestima</span>
+        <span>Sin catalogar = detectados en viajes aún no validados</span>
+      </div>
     </div>
   );
 }
 
 // ─── COMPONENTE PRINCIPAL ─────────────────────────────────────────────────────
 export default function Dashboard({ data, onGoTrips, onGoUpload, firstPendingTrip, onGoFirstPending }) {
-  const [projTab, setProjTab] = useState("validated");
 
-  // ── KPIs base (validados) — siempre disponible ────────────────────────────
+  // KPIs base — viajes validados
   const kpis = useMemo(
     () => data?.trips ? aggregateKPIs(data.trips) : null,
     [data?.trips]
   );
 
-  // ── Proyección lazy — corre los modelos sobre todos los viajes ────────────
-  // Se computa solo cuando hay trips y se necesita (al montar si hay datos).
-  // aggregateProjected corre los modelos solo sobre viajes pendientes.
-  const projA    = useMemo(() => data?.trips ? aggregateProjected(data.trips, "A")    : null, [data?.trips]);
-  const projB    = useMemo(() => data?.trips ? aggregateProjected(data.trips, "B")    : null, [data?.trips]);
-  const projC    = useMemo(() => data?.trips ? aggregateProjected(data.trips, "C")    : null, [data?.trips]);
-  const projCons = useMemo(() => data?.trips ? aggregateProjected(data.trips, "cons") : null, [data?.trips]);
+  // Calibración — lazy, corre todos los modelos sobre todos los viajes
+  const calib = useMemo(
+    () => data?.trips ? aggregateCalibration(data.trips) : null,
+    [data?.trips]
+  );
 
   if (!data || !kpis) return <EmptyDashboard onGoUpload={onGoUpload}/>;
 
-  // ── Seleccionar proyección activa ─────────────────────────────────────────
-  const projMap = { A: projA, B: projB, C: projC, cons: projCons };
-  const isValidatedOnly = projTab === "validated";
-  const activeTab = PROJ_TABS.find(t => t.key === projTab);
-
-  // Para el tab "validated" fabricamos un objeto proj con la misma forma
-  const proj = isValidatedOnly
-    ? {
-        totalServices:     kpis.totalServices,
-        validatedServices: kpis.totalServices,
-        projectedServices: 0,
-        ops:               kpis.ops,
-        opsValidated:      kpis.ops,
-        opsProjected:      { agua_zc:0,slop_zc:0,lub_zc:0,alijo_zc:0,alijo_za:0,alijo_zd:0 },
-      }
-    : (projMap[projTab] ?? null);
-
-  // ── Métricas de cabecera ──────────────────────────────────────────────────
   const reviewable = kpis.reviewableTrips ?? kpis.totalTrips;
   const pct        = reviewable ? Math.round(kpis.validatedTrips / reviewable * 100) : 0;
   const dateRange  = fmtDateRange(data.trips);
 
-  // Impacto FSV — usa proyección activa
+  // Impacto FSV — usa servicios reales validados
   const AGUA_PRECIO=250, AGUA_SVC_AÑO=65;
   const SLOP_PRECIO=100, SLOP_SVC_AÑO=100;
-  const revenueExtra = proj
-    ? (proj.ops.agua_zc * AGUA_PRECIO * AGUA_SVC_AÑO) +
-      (proj.ops.slop_zc * SLOP_PRECIO * SLOP_SVC_AÑO)
-    : 0;
+  const revenueExtra =
+    (kpis.ops.agua_zc * AGUA_PRECIO * AGUA_SVC_AÑO) +
+    (kpis.ops.slop_zc * SLOP_PRECIO * SLOP_SVC_AÑO);
 
   const kpiCards = [
-    { val: reviewable,            lbl:"Viajes",     sub: kpis.noDataTrips>0?`${kpis.noDataTrips} sin datos`:"con datos AIS", col:"#235C96" },
-    { val: kpis.validatedTrips,   lbl:"Validados",  sub:`${pct}% completado`,  col:"#1E7A4A" },
-    { val: kpis.pendingTrips,     lbl:"Pendientes", sub:"por revisar",         col:"#92400E" },
-    { val: proj?.totalServices ?? 0,
-                                  lbl:"Servicios",  sub: isValidatedOnly ? "validados" : `${proj?.validatedServices??0}✓ + ${proj?.projectedServices??0}~`, col: activeTab?.color ?? "#1E7A4A" },
-    { val: proj?.ops?.agua_zc ?? 0, lbl:"Agua / ZC", sub:"→ P&L B108",        col:"#2196F3" },
-    { val: proj?.ops?.slop_zc ?? 0, lbl:"Slop / ZC", sub:"→ P&L B109",        col:"#FF9800" },
+    { val:reviewable,           lbl:"Viajes",     sub:kpis.noDataTrips>0?`${kpis.noDataTrips} sin datos`:"con datos AIS", col:"#235C96" },
+    { val:kpis.validatedTrips,  lbl:"Validados",  sub:`${pct}% completado`,  col:"#1E7A4A" },
+    { val:kpis.pendingTrips,    lbl:"Pendientes", sub:"por revisar",         col:"#92400E" },
+    { val:kpis.totalServices,   lbl:"Servicios",  sub:"validados manualmente", col:"#1E7A4A" },
+    { val:kpis.ops.agua_zc,     lbl:"Agua / ZC",  sub:"→ P&L B108",          col:"#2196F3" },
+    { val:kpis.ops.slop_zc,     lbl:"Slop / ZC",  sub:"→ P&L B109",          col:"#FF9800" },
   ];
   if (kpis.incompleteTrips > 0)
     kpiCards.push({ val:kpis.incompleteTrips, lbl:"Incompletos", sub:"sin arribo", col:"#F59E0B" });
@@ -327,46 +411,15 @@ export default function Dashboard({ data, onGoTrips, onGoUpload, firstPendingTri
             <div style={{fontSize:22,fontWeight:700,color:k.col,lineHeight:1,marginBottom:3}}>
               {typeof k.val==="number" ? k.val.toLocaleString("es-AR") : k.val}
             </div>
-            <div style={{fontSize:10,color:"#6381A7",textTransform:"uppercase",letterSpacing:".7px"}}>{k.lbl}</div>
+            <div style={{fontSize:10,color:"#6381A7",textTransform:"uppercase",
+                         letterSpacing:".7px"}}>{k.lbl}</div>
             <div style={{fontSize:9,color:"#A5B5CC",marginTop:2}}>{k.sub}</div>
           </div>
         ))}
       </div>
 
-      {/* ── TABS DE PROYECCIÓN ── */}
-      <div style={{marginBottom:4}}>
-        <div style={{fontSize:9,color:"#6381A7",fontFamily:"var(--mono)",
-                     textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>
-          Vista de servicios — fuente de datos
-        </div>
-        <ProjectionTabs
-          active={projTab}
-          onChange={setProjTab}
-          pendingTrips={kpis.pendingTrips}
-        />
-      </div>
-
-      {/* Explicación del tab activo */}
-      <div style={{fontSize:10,color:"#6381A7",marginBottom:12,fontFamily:"var(--mono)",
-                   padding:"6px 12px",background:"#F8FAFC",borderRadius:6,
-                   borderLeft:`3px solid ${activeTab?.color}`}}>
-        {isValidatedOnly
-          ? `Mostrando ${kpis.totalServices} servicios de ${kpis.validatedTrips} viajes validados manualmente.`
-          : `Mostrando ${proj?.validatedServices??0} servicios validados + ${proj?.projectedServices??0} estimados por ${activeTab?.sub} en ${kpis.pendingTrips} viajes pendientes.`
-        }
-        {!isValidatedOnly && (
-          <span style={{color:"#F59E0B",marginLeft:6}}>~ = estimado, no validado</span>
-        )}
-      </div>
-
-      {/* Breakdown con split visual */}
-      {proj && (
-        <OpsBreakdown
-          proj={proj}
-          isValidatedOnly={isValidatedOnly}
-          accentColor={activeTab?.color ?? "#1E7A4A"}
-        />
-      )}
+      {/* Tabla de calibración */}
+      {calib && <CalibrationTable calib={calib} />}
 
       {/* Impacto FSV */}
       {revenueExtra > 0 && (
@@ -374,29 +427,24 @@ export default function Dashboard({ data, onGoTrips, onGoUpload, firstPendingTri
                      padding:"14px 16px",fontSize:12,color:"#065F46",lineHeight:1.7,marginBottom:16}}>
           <div style={{fontWeight:700,marginBottom:4}}>💡 Impacto estimado en el modelo FSV</div>
           <div>
-            {proj?.ops.agua_zc} ops agua × ${AGUA_PRECIO} × {AGUA_SVC_AÑO} svc/año
+            {kpis.ops.agua_zc} ops agua × ${AGUA_PRECIO} × {AGUA_SVC_AÑO} svc/año
             {" + "}
-            {proj?.ops.slop_zc} ops slop × ${SLOP_PRECIO} × {SLOP_SVC_AÑO} svc/año
-            {!isValidatedOnly && (
-              <span style={{color:"#F59E0B",marginLeft:6,fontSize:10}}>
-                (incluye estimados)
-              </span>
-            )}
+            {kpis.ops.slop_zc} ops slop × ${SLOP_PRECIO} × {SLOP_SVC_AÑO} svc/año
           </div>
           <div style={{fontSize:16,fontWeight:800,marginTop:6,color:"#047857"}}>
             = USD {revenueExtra.toLocaleString("es-AR")} / año estimado
           </div>
           <div style={{fontSize:10,color:"#6EE7B7",marginTop:4,fontFamily:"var(--mono)"}}>
-            * Estimación con supuestos del modelo. Actualizá el P&L con valores reales.
+            * Solo servicios validados. Actualizá el P&L con valores reales.
           </div>
         </div>
       )}
 
       {/* Aviso sin servicios */}
-      {(proj?.totalServices ?? 0) === 0 && data.trips.length > 0 && (
+      {kpis.totalServices === 0 && data.trips.length > 0 && (
         <div style={{background:"#FFF7ED",border:"1px solid #FED7AA",borderRadius:9,
                      padding:"12px 16px",fontSize:12,color:"#92400E",lineHeight:1.6}}>
-          <strong>No se detectaron servicios aún.</strong><br/>
+          <strong>No se detectaron servicios validados aún.</strong><br/>
           Abrí cada viaje en Trip Viewer y clasificá los puntos de parada.
           {onGoTrips && (
             <span role="button" tabIndex={0}
