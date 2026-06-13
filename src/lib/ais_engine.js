@@ -395,10 +395,20 @@ export function detectIdlePeriods(points, trips) {
 
 // ─── KPI AGGREGATION ─────────────────────────────────────────────────────────
 /**
- * FIX MEDIO: aggregateKPIs agrupa segmentos contiguos WORKING_STOP correctamente.
- * En lugar de detectar transiciones punto a punto, primero agrupa los puntos
- * en segmentos contiguos por estado. Cada segmento WORKING_STOP = 1 servicio.
- * El tipo_servicio se determina por mayoría en el segmento, no solo el primer punto.
+ * aggregateKPIs — usa el vocabulario actual del TripViewer (clasificación manual).
+ *
+ * El parser automático asignaba state="WORKING_STOP" a puntos en zona operativa.
+ * El sistema de clasificación manual usa en cambio:
+ *   - servicio_num (1, 2, 3...) para identificar a qué servicio pertenece cada punto
+ *   - tipo_servicio ("AGUA", "SLOP", etc.) para el tipo
+ *   - state = null en puntos de cluster
+ *
+ * La versión anterior agrupaba por state === "WORKING_STOP" → nunca encontraba
+ * clusters manuales → totalServices y ops siempre daban 0.
+ *
+ * Fix: agrupar por servicio_num dentro de cada viaje validado.
+ * Cada servicio_num distinto = 1 servicio. Solo viajes con validated=true.
+ * tipo_servicio se determina por mayoría entre todos los puntos del grupo.
  */
 export function aggregateKPIs(trips) {
   const ops = {
@@ -408,22 +418,26 @@ export function aggregateKPIs(trips) {
   let totalServices = 0;
 
   for (const trip of trips) {
-    const segments = groupContiguousSegments(trip.points);
+    if (!trip.validated) continue;
+    if (!trip.points?.length) continue;
 
-    for (const seg of segments) {
-      if (seg.state !== "WORKING_STOP") continue;
+    // Agrupar puntos por servicio_num — cada número único es un servicio
+    const byServiceNum = {};
+    for (const pt of trip.points) {
+      if (pt.servicio_num == null) continue;
+      if (!byServiceNum[pt.servicio_num]) byServiceNum[pt.servicio_num] = [];
+      byServiceNum[pt.servicio_num].push(pt);
+    }
 
+    for (const pts of Object.values(byServiceNum)) {
       totalServices++;
 
-      // Determinar tipo_servicio predominante del segmento
+      // tipo_servicio por mayoría — ignorar SIN_CLASIFICAR y BORRADO
       const typeCount = {};
-      for (const pt of seg.points) {
-        if (
-          pt.tipo_servicio &&
-          pt.tipo_servicio !== "SIN_CLASIFICAR" &&
-          pt.tipo_servicio !== "BORRADO"
-        ) {
-          typeCount[pt.tipo_servicio] = (typeCount[pt.tipo_servicio] || 0) + 1;
+      for (const pt of pts) {
+        const t = pt.tipo_servicio;
+        if (t && t !== "SIN_CLASIFICAR" && t !== "BORRADO") {
+          typeCount[t] = (typeCount[t] || 0) + 1;
         }
       }
 
@@ -437,20 +451,88 @@ export function aggregateKPIs(trips) {
     }
   }
 
+  // ── Conteo por modelo (solo viajes validados) ───────────────────────────────
+  // Corremos los 3 modelos de detección sobre cada viaje validado para mostrar
+  // en el Dashboard cuántos servicios detecta cada algoritmo vs el consenso.
+  const emptyOps = () => ({ agua_zc:0, slop_zc:0, lub_zc:0, alijo_zc:0, alijo_za:0, alijo_zd:0 });
+  const opsA = emptyOps(), opsB = emptyOps(), opsC = emptyOps(), opsCons = emptyOps();
+  let totalA = 0, totalB = 0, totalC = 0, totalCons = 0;
+
+  // Helper: dado un resultado de modelo (Array<{origIdx, servicio_num}>) y los
+  // puntos del viaje, cuenta servicios y suma tipos al objeto ops destino.
+  const accumulateModel = (modelResult, tripPoints, opsTarget, totalRef) => {
+    // Agrupar origIdx por servicio_num
+    const byNum = {};
+    for (const { origIdx, servicio_num } of modelResult) {
+      if (!byNum[servicio_num]) byNum[servicio_num] = [];
+      byNum[servicio_num].push(tripPoints[origIdx]);
+    }
+    for (const pts of Object.values(byNum)) {
+      totalRef.count++;
+      const typeCount = {};
+      for (const pt of pts) {
+        const t = pt?.tipo_servicio;
+        if (t && t !== "SIN_CLASIFICAR" && t !== "BORRADO") typeCount[t] = (typeCount[t]||0)+1;
+      }
+      const dominant = Object.entries(typeCount).sort((a,b)=>b[1]-a[1])[0]?.[0];
+      if (dominant) { const plRow = SERVICE_TYPES[dominant]?.plRow; if (plRow && opsTarget[plRow] !== undefined) opsTarget[plRow]++; }
+    }
+  };
+
+  // Helper para consenso: usa consensusMap
+  const accumulateConsensus = (consensusMap, tripPoints, opsTarget, totalRef) => {
+    const byNum = {};
+    consensusMap.forEach(({ servicio_num }, origIdx) => {
+      if (!byNum[servicio_num]) byNum[servicio_num] = [];
+      byNum[servicio_num].push(tripPoints[origIdx]);
+    });
+    for (const pts of Object.values(byNum)) {
+      totalRef.count++;
+      const typeCount = {};
+      for (const pt of pts) {
+        const t = pt?.tipo_servicio;
+        if (t && t !== "SIN_CLASIFICAR" && t !== "BORRADO") typeCount[t] = (typeCount[t]||0)+1;
+      }
+      const dominant = Object.entries(typeCount).sort((a,b)=>b[1]-a[1])[0]?.[0];
+      if (dominant) { const plRow = SERVICE_TYPES[dominant]?.plRow; if (plRow && opsTarget[plRow] !== undefined) opsTarget[plRow]++; }
+    }
+  };
+
+  const refA = {count:0}, refB = {count:0}, refC = {count:0}, refCons = {count:0};
+  for (const trip of trips) {
+    if (!trip.validated || !trip.points?.length) continue;
+    const resA = runModelA(trip.points);
+    const resB = runModelB(trip.points);
+    const resC = runModelC(trip.points);
+    const cMap = buildConsensus(trip.points, resA, resB, resC);
+    accumulateModel(resA, trip.points, opsA, refA);
+    accumulateModel(resB, trip.points, opsB, refB);
+    accumulateModel(resC, trip.points, opsC, refC);
+    accumulateConsensus(cMap, trip.points, opsCons, refCons);
+  }
+  totalA = refA.count; totalB = refB.count; totalC = refC.count; totalCons = refCons.count;
+
   // BUG-03: viajes sin puntos AIS no son revisables — excluirlos de los conteos
   // operativos para que el Dashboard muestre numeros consistentes con la lista.
   const tripsWithData    = trips.filter(t => t.points?.length > 0);
   const tripsWithoutData = trips.length - tripsWithData.length;
 
   return {
-    totalTrips:      trips.length,           // total real incluyendo vacios (para denominador)
-    reviewableTrips: tripsWithData.length,   // viajes con datos = los que el operador revisa
+    totalTrips:      trips.length,
+    reviewableTrips: tripsWithData.length,
     validatedTrips:  tripsWithData.filter(t => t.validated).length,
     pendingTrips:    tripsWithData.filter(t => !t.validated).length,
     noDataTrips:     tripsWithoutData,
     incompleteTrips: trips.filter(t => t.incomplete).length,
     totalServices,
     ops,
+    // Breakdown por modelo (solo viajes validados, usando tipo_servicio existente)
+    models: {
+      A:    { label: "Conservador", total: totalA,    ops: opsA    },
+      B:    { label: "Literal",     total: totalB,    ops: opsB    },
+      C:    { label: "Geoespacial", total: totalC,    ops: opsC    },
+      cons: { label: "Consenso",    total: totalCons, ops: opsCons },
+    },
   };
 }
 
@@ -509,4 +591,162 @@ export function formatDatetime(dt, opts = {}) {
 
   const timePart = showSeconds ? `${hh}:${min}:${ss}` : `${hh}:${min}`;
   return showDate ? `${dd}/${mm}/${yy} ${timePart} UTC` : timePart;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── MULTI-MODEL DETECTION ENGINE ────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// Exportado desde ais_engine para ser usado tanto en TripViewer (modal de
+// consenso) como en aggregateKPIs (Dashboard con breakdown por modelo).
+//
+// Cada modelo recibe el array de puntos de UN viaje y devuelve:
+//   Array<{ origIdx: number, servicio_num: number }>
+// Solo cubre puntos de ZONA_COMUN; los puntos de navegación los maneja el caller.
+
+const _centroidOf = items => {
+  const valid = items.filter(({ p }) => p.lat != null && p.lon != null);
+  if (!valid.length) return null;
+  return {
+    lat: valid.reduce((s, { p }) => s + p.lat, 0) / valid.length,
+    lon: valid.reduce((s, { p }) => s + p.lon, 0) / valid.length,
+  };
+};
+
+// ─── MODELO A — "Conservador" ─────────────────────────────────────────────────
+// Gap < 60 min entre cualquier punto de ZC → mismo cluster. Sin filtro de SOG.
+export function runModelA(points) {
+  const zcPts = points.map((p, i) => ({ p, i })).filter(({ p }) => p.zone === "ZONA_COMUN");
+  if (!zcPts.length) return [];
+  const MAX_GAP_MIN = 60;
+  const groups = [];
+  let cur = null;
+  for (const item of zcPts) {
+    if (!cur) { cur = [item]; continue; }
+    const gapMin = (new Date(item.p.datetime) - new Date(cur[cur.length-1].p.datetime)) / 60000;
+    if (gapMin <= MAX_GAP_MIN) { cur.push(item); } else { groups.push(cur); cur = [item]; }
+  }
+  if (cur) groups.push(cur);
+  const result = [];
+  groups.forEach((grp, gi) => {
+    const minIdx = Math.min(...grp.map(({ i }) => i));
+    const maxIdx = Math.max(...grp.map(({ i }) => i));
+    zcPts.filter(({ i }) => i >= minIdx && i <= maxIdx)
+      .forEach(({ i }) => result.push({ origIdx: i, servicio_num: gi + 1 }));
+  });
+  return result;
+}
+
+// ─── MODELO B — "Literal" ─────────────────────────────────────────────────────
+// SOG < 4 kn en ZC → candidato. Gap > 90 min O dist centroide > 0.5nm = corte.
+export function runModelB(points) {
+  const zcPts = points.map((p, i) => ({ p, i })).filter(({ p }) => p.zone === "ZONA_COMUN");
+  if (!zcPts.length) return [];
+  const MAX_GAP_MIN = 90, MAX_DIST_NM = 0.5;
+  const candidatos = zcPts.filter(({ p }) => p.sog != null && p.sog < 4);
+  const groups = [];
+  let cur = null;
+  for (const item of candidatos) {
+    if (!cur) { cur = [item]; continue; }
+    const gapMin = (new Date(item.p.datetime) - new Date(cur[cur.length-1].p.datetime)) / 60000;
+    const ctr = _centroidOf(cur);
+    const distNm = (ctr && item.p.lat != null && item.p.lon != null)
+      ? haversine(ctr.lat, ctr.lon, item.p.lat, item.p.lon) : 0;
+    if (gapMin > MAX_GAP_MIN || distNm > MAX_DIST_NM) { groups.push(cur); cur = [item]; }
+    else { cur.push(item); }
+  }
+  if (cur) groups.push(cur);
+  const result = [];
+  groups.forEach((grp, gi) => {
+    const minIdx = Math.min(...grp.map(({ i }) => i));
+    const maxIdx = Math.max(...grp.map(({ i }) => i));
+    zcPts.filter(({ i }) => i >= minIdx && i <= maxIdx)
+      .forEach(({ i }) => result.push({ origIdx: i, servicio_num: gi + 1 }));
+  });
+  return result;
+}
+
+// ─── MODELO C — "Geoespacial" ─────────────────────────────────────────────────
+// Ignora el tiempo. Agrupa por proximidad geográfica < 500m (single-linkage).
+export function runModelC(points) {
+  const MAX_DIST_NM = 500 / 1852;
+  const zcPts = points.map((p, i) => ({ p, i }))
+    .filter(({ p }) => p.zone === "ZONA_COMUN" && p.lat != null && p.lon != null);
+  if (!zcPts.length) return [];
+  const groups = [];
+  for (const item of zcPts) {
+    let assigned = false;
+    for (const grp of groups) {
+      if (grp.some(({ p }) => haversine(p.lat, p.lon, item.p.lat, item.p.lon) <= MAX_DIST_NM)) {
+        grp.push(item); assigned = true; break;
+      }
+    }
+    if (!assigned) groups.push([item]);
+  }
+  groups.sort((a, b) => Math.min(...a.map(x=>x.i)) - Math.min(...b.map(x=>x.i)));
+  const result = [];
+  groups.forEach((grp, gi) => grp.forEach(({ i }) => result.push({ origIdx: i, servicio_num: gi + 1 })));
+  return result;
+}
+
+// ─── CONSENSUS ENGINE ─────────────────────────────────────────────────────────
+// Devuelve consensusMap: Map<origIdx, { servicio_num, ambiguous }>
+// Un par de puntos va al mismo cluster de consenso si ≥ 2 de 3 modelos los unen.
+export function buildConsensus(points, resA, resB, resC) {
+  const mapA = new Map(resA.map(r => [r.origIdx, r.servicio_num]));
+  const mapB = new Map(resB.map(r => [r.origIdx, r.servicio_num]));
+  const mapC = new Map(resC.map(r => [r.origIdx, r.servicio_num]));
+  const allZcIdx = [...new Set([...resA, ...resB, ...resC].map(r => r.origIdx))].sort((a,b)=>a-b);
+  if (!allZcIdx.length) return new Map();
+
+  const parent = {};
+  allZcIdx.forEach(i => { parent[i] = i; });
+  const find = x => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+  const union = (a, b) => { parent[find(a)] = find(b); };
+
+  const groupsByModel = [mapA, mapB, mapC].map(m => {
+    const byGroup = {};
+    m.forEach((snum, idx) => { if (!byGroup[snum]) byGroup[snum] = []; byGroup[snum].push(idx); });
+    return byGroup;
+  });
+
+  const pairCount = new Map();
+  groupsByModel.forEach(byGroup => {
+    Object.values(byGroup).forEach(idxList => {
+      for (let a = 0; a < idxList.length; a++) {
+        for (let b = a + 1; b < idxList.length; b++) {
+          const key = `${Math.min(idxList[a],idxList[b])}-${Math.max(idxList[a],idxList[b])}`;
+          pairCount.set(key, (pairCount.get(key) ?? 0) + 1);
+        }
+      }
+    });
+  });
+
+  pairCount.forEach((count, key) => {
+    if (count >= 2) { const [a, b] = key.split("-").map(Number); union(a, b); }
+  });
+
+  const consensusGroups = {};
+  allZcIdx.forEach(i => { const r = find(i); if (!consensusGroups[r]) consensusGroups[r] = []; consensusGroups[r].push(i); });
+  const sortedRoots = Object.keys(consensusGroups).map(Number)
+    .sort((a,b) => Math.min(...consensusGroups[a]) - Math.min(...consensusGroups[b]));
+
+  const consensusMap = new Map();
+  sortedRoots.forEach((root, gi) => {
+    const indices = consensusGroups[root];
+    const groupPairs = [];
+    for (let a = 0; a < indices.length; a++)
+      for (let b = a+1; b < indices.length; b++) {
+        const key = `${Math.min(indices[a],indices[b])}-${Math.max(indices[a],indices[b])}`;
+        groupPairs.push(pairCount.get(key) ?? 0);
+      }
+    const ambiguous = groupPairs.length > 0 && groupPairs.some(c => c < 2);
+    indices.forEach(i => consensusMap.set(i, { servicio_num: gi + 1, ambiguous }));
+  });
+  return consensusMap;
+}
+
+// ─── HELPER: contar servicios únicos en un resultado de modelo ────────────────
+// Devuelve el número de servicio_num distintos (= clusters detectados).
+export function countModelServices(modelResult) {
+  return new Set(modelResult.map(r => r.servicio_num)).size;
 }
