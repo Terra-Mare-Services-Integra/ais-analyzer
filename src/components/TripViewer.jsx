@@ -875,226 +875,426 @@ function buildConsensus(points, resA, resB, resC) {
   return { rows, consensusMap };
 }
 
-// ─── CONSENSUS MODAL ─────────────────────────────────────────────────────────
-function ConsensusModal({ points, onApply, onClose }) {
-  const resA = useMemo(() => runModelA(points), [points]);
-  const resB = useMemo(() => runModelB(points), [points]);
-  const resC = useMemo(() => runModelC(points), [points]);
-  const { rows, consensusMap } = useMemo(
-    () => buildConsensus(points, resA, resB, resC),
-    [points, resA, resB, resC]
+// ─── COMPARISON MODE — 4 Mapas sincronizados ─────────────────────────────────
+//
+// Arquitectura de sincronización:
+//   • mapRefs: array de 4 refs a instancias de Leaflet (L.Map)
+//   • MapSyncController: componente interno de react-leaflet que, al montar,
+//     registra un listener 'moveend' en su mapa y propaga center+zoom a los
+//     otros 3. useRef(true) previene bucles de retroalimentación.
+//   • Cada SyncedMapView recibe su ref a través de una callback ref que
+//     ComparisonMode pasa como prop.
+
+// ─── MapSyncController ────────────────────────────────────────────────────────
+// Componente sin render que vive DENTRO de un MapContainer.
+// Lee useMap() para obtener la instancia y registra la sincronización.
+function MapSyncController({ mapRefs, ownIdx }) {
+  const map = useMap();
+  const syncing = useRef(false);
+
+  useEffect(() => {
+    if (!map) return;
+    // Guardar la instancia en el array compartido
+    mapRefs.current[ownIdx] = map;
+
+    const onMove = () => {
+      if (syncing.current) return;
+      syncing.current = true;
+      const center = map.getCenter();
+      const zoom   = map.getZoom();
+      mapRefs.current.forEach((m, i) => {
+        if (i !== ownIdx && m) {
+          m.setView(center, zoom, { animate: false });
+        }
+      });
+      syncing.current = false;
+    };
+
+    map.on("moveend", onMove);
+    return () => { map.off("moveend", onMove); mapRefs.current[ownIdx] = null; };
+  }, [map, mapRefs, ownIdx]);
+
+  return null;
+}
+
+// ─── MapFitOnce ───────────────────────────────────────────────────────────────
+// Igual que MapFit pero acepta un flag externo para poder forzar re-fit.
+function MapFitOnce({ points }) {
+  const map    = useMap();
+  const fitted = useRef(false);
+  useEffect(() => {
+    if (fitted.current || !points?.length) return;
+    const lats = points.map(p => p.lat).filter(Number.isFinite);
+    const lons = points.map(p => p.lon).filter(Number.isFinite);
+    if (!lats.length) return;
+    map.fitBounds([
+      [Math.min(...lats) - .05, Math.min(...lons) - .05],
+      [Math.max(...lats) + .05, Math.max(...lons) + .05],
+    ], { padding: [20, 20], maxZoom: 13 });
+    fitted.current = true;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [map]);
+  return null;
+}
+
+// ─── buildPointsFromModelResult ──────────────────────────────────────────────
+// Convierte el resultado de un modelo (Array<{origIdx, servicio_num}>) +
+// (optionally) un consensusMap en un array de puntos "hydrated" con
+// servicio_num y state asignados, listos para mostrarse en el mapa.
+// Los puntos que no aparecen en el resultado quedan con state = "TRANSITO".
+function buildPointsFromModelResult(rawPoints, modelResult, consensusMap) {
+  // idx → servicio_num
+  const byIdx = new Map(modelResult.map(r => [r.origIdx, r.servicio_num]));
+
+  const zcPts = rawPoints
+    .map((p, i) => ({ p, i }))
+    .filter(({ p }) => p.zone === "ZONA_COMUN");
+
+  const updates = {};
+
+  // Clusters del modelo
+  byIdx.forEach((snum, idx) => {
+    updates[idx] = { state: null, servicio_num: snum, ambiguous: false };
+  });
+
+  // Puntos ZC no asignados → TRANSITO si SOG alto
+  zcPts.forEach(({ p, i }) => {
+    if (updates[i]) return;
+    updates[i] = { state: "TRANSITO", servicio_num: null, ambiguous: false };
+  });
+
+  // Si se pasa un consensusMap (modo consenso), marcar ambiguos
+  if (consensusMap) {
+    consensusMap.forEach(({ servicio_num, ambiguous }, origIdx) => {
+      updates[origIdx] = { state: null, servicio_num, ambiguous: ambiguous ?? false };
+    });
+  }
+
+  // ZARPE / LLEGADA
+  rawPoints.forEach((p, i) => {
+    if (i === 0)                       updates[i] = { state: "ZARPE",   servicio_num: null, ambiguous: false };
+    else if (i === rawPoints.length-1) updates[i] = { state: "LLEGADA", servicio_num: null, ambiguous: false };
+    else if (!updates[i])              updates[i] = { state: "TRANSITO",servicio_num: null, ambiguous: false };
+  });
+
+  return rawPoints.map((p, i) => {
+    const u = updates[i];
+    if (!u) return { ...p };
+    return { ...p, state: u.state, servicio_num: u.servicio_num, _ambiguous: u.ambiguous };
+  });
+}
+
+// ─── SyncedMapView ────────────────────────────────────────────────────────────
+// Un mapa individual dentro del grid de comparación.
+// props:
+//   label       — "Modelo A", "Consenso", etc.
+//   sublabel    — "Conservador", "2 de 3", etc.
+//   accentColor — color del header del mapa
+//   points      — array de puntos hydrated (con servicio_num asignado)
+//   clusterCount — número de clusters detectados
+//   mapRefs     — ref compartido con los otros 3 mapas
+//   ownIdx      — 0..3, identifica este mapa en mapRefs
+//   onUse       — callback "Usar este"
+//   onEdit      — callback "Editar este"
+//   initialCenter/initialZoom — para primer fit compartido
+function SyncedMapView({
+  label, sublabel, accentColor,
+  points, clusterCount, ambiguousCount,
+  mapRefs, ownIdx,
+  onUse, onEdit,
+}) {
+  // Construir segmentos de polilínea coloreados
+  const segments = useMemo(() => {
+    const segs = [];
+    for (let i = 0; i < points.length - 1; i++) {
+      const p   = points[i];
+      const col = p._ambiguous ? "#F59E0B" : pointColor(p);
+      segs.push({
+        pos:   [[p.lat, p.lon], [points[i+1].lat, points[i+1].lon]],
+        color: col,
+      });
+    }
+    return segs;
+  }, [points]);
+
+  return (
+    <div style={{
+      display: "flex", flexDirection: "column",
+      border: "1px solid #D6E0ED", borderRadius: 8,
+      overflow: "hidden", background: "#fff",
+      boxShadow: "0 1px 4px rgba(0,0,0,.08)",
+    }}>
+      {/* Header del mapa */}
+      <div style={{
+        padding: "6px 10px", background: accentColor,
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        flexShrink: 0,
+      }}>
+        <div>
+          <span style={{ fontSize: 11, fontWeight: 800, color: "#fff", fontFamily: "var(--sans)" }}>
+            {label}
+          </span>
+          <span style={{ fontSize: 9, color: "rgba(255,255,255,.7)", marginLeft: 6, fontFamily: "var(--mono)" }}>
+            {sublabel}
+          </span>
+        </div>
+        <div style={{ display: "flex", gap: 5 }}>
+          <span style={{
+            fontSize: 9, fontWeight: 700, color: "#fff",
+            background: "rgba(255,255,255,.2)", padding: "2px 7px", borderRadius: 10,
+            fontFamily: "var(--mono)",
+          }}>
+            {clusterCount} cluster{clusterCount !== 1 ? "s" : ""}
+          </span>
+          {ambiguousCount > 0 && (
+            <span style={{
+              fontSize: 9, fontWeight: 700, color: "#92400E",
+              background: "#FEF3C7", padding: "2px 7px", borderRadius: 10,
+              fontFamily: "var(--mono)",
+            }}>
+              ⚠ {ambiguousCount}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Mapa Leaflet */}
+      <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
+        <MapContainer
+          center={[-34.7, -58.0]}
+          zoom={9}
+          style={{ height: "100%", width: "100%" }}
+          zoomControl={ownIdx === 0}
+        >
+          <TileLayer
+            attribution="© OpenStreetMap contributors"
+            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+          />
+          <MapFitOnce points={points} />
+          <MapSyncController mapRefs={mapRefs} ownIdx={ownIdx} />
+
+          {/* Zonas geográficas */}
+          {Object.entries(ZONES).map(([key, z]) => (
+            <Polygon key={key}
+              positions={z.polygon.map(([a,b]) => [a,b])}
+              pathOptions={{ color: z.color, weight: 1, opacity: 0.5,
+                             fillColor: z.color, fillOpacity: 0.06, dashArray: "4,4" }}>
+            </Polygon>
+          ))}
+
+          {/* Polilíneas */}
+          {segments.map((s, i) => (
+            <Polyline key={`${i}-${s.color}`} positions={s.pos} color={s.color} weight={2.5} opacity={0.8} />
+          ))}
+
+          {/* Marcadores */}
+          {points.map((p, i) => {
+            if (p.lat == null || p.lon == null) return null;
+            const isCluster  = p.servicio_num != null;
+            const isAmbiguous = p._ambiguous;
+            const col = isAmbiguous ? "#F59E0B" : pointColor(p);
+
+            if (!isCluster && p.state !== "ZARPE" && p.state !== "LLEGADA") {
+              return (
+                <CircleMarker key={i} center={[p.lat, p.lon]} radius={2}
+                  color="#ccc" weight={1} fillColor="#ccc" fillOpacity={0.35} />
+              );
+            }
+
+            const radius = (p.state === "ZARPE" || p.state === "LLEGADA") ? 8
+              : isAmbiguous ? 9 : 7;
+
+            return (
+              <CircleMarker key={`${i}-${p.servicio_num ?? p.state}`}
+                center={[p.lat, p.lon]} radius={radius}
+                color={isCluster ? "#fff" : col} weight={isCluster ? 1.5 : 2}
+                fillColor={col} fillOpacity={0.95}>
+                <Popup>
+                  <div style={{ fontSize: 11 }}>
+                    <strong style={{ color: col }}>
+                      {isAmbiguous ? "⚠ Ambiguo" : isCluster ? `C${p.servicio_num}` : p.state}
+                    </strong><br />
+                    {fmtTime(p.datetime)} {TZ_LABEL}<br />
+                    SOG: {p.sog != null ? `${Number(p.sog).toFixed(1)} kn` : "—"}
+                  </div>
+                </Popup>
+              </CircleMarker>
+            );
+          })}
+        </MapContainer>
+      </div>
+
+      {/* Footer con botones */}
+      <div style={{
+        padding: "7px 10px", borderTop: "1px solid #EEF2F7",
+        display: "flex", gap: 6, flexShrink: 0, background: "#F8FAFC",
+      }}>
+        <button
+          onClick={onEdit}
+          style={{
+            flex: 1, padding: "6px 0", borderRadius: 6, fontSize: 10,
+            border: `1px solid ${accentColor}`, background: "#fff",
+            color: accentColor, fontWeight: 600, cursor: "pointer",
+            fontFamily: "var(--sans)",
+          }}>
+          ✏ Editar este
+        </button>
+        <button
+          onClick={onUse}
+          style={{
+            flex: 1, padding: "6px 0", borderRadius: 6, fontSize: 10,
+            border: "none", background: accentColor,
+            color: "#fff", fontWeight: 700, cursor: "pointer",
+            fontFamily: "var(--sans)",
+          }}>
+          ✓ Usar este
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── ComparisonMode ───────────────────────────────────────────────────────────
+// Pantalla fullscreen con grilla 2×2 de mapas sincronizados.
+// rawPoints: puntos originales del viaje (sin asignaciones del modelo)
+// onApply(modelResult, isConsensus): carga el resultado seleccionado
+// onClose(): cierra sin cambios
+function ComparisonMode({ rawPoints, onApply, onClose }) {
+  const mapRefs = useRef([null, null, null, null]);
+
+  // Correr los 3 modelos
+  const resA = useMemo(() => runModelA(rawPoints), [rawPoints]);
+  const resB = useMemo(() => runModelB(rawPoints), [rawPoints]);
+  const resC = useMemo(() => runModelC(rawPoints), [rawPoints]);
+  const consensusMap = useMemo(
+    () => buildConsensus(rawPoints, resA, resB, resC),
+    [rawPoints, resA, resB, resC]
   );
 
+  // Hydrate points para cada modelo
+  const ptsA    = useMemo(() => buildPointsFromModelResult(rawPoints, resA, null),         [rawPoints, resA]);
+  const ptsB    = useMemo(() => buildPointsFromModelResult(rawPoints, resB, null),         [rawPoints, resB]);
+  const ptsC    = useMemo(() => buildPointsFromModelResult(rawPoints, resC, null),         [rawPoints, resC]);
+  const ptsCons = useMemo(() => buildPointsFromModelResult(rawPoints, [], consensusMap),   [rawPoints, consensusMap]);
+
+  // Conteos
+  const countA    = new Set(resA.map(r => r.servicio_num)).size;
+  const countB    = new Set(resB.map(r => r.servicio_num)).size;
+  const countC    = new Set(resC.map(r => r.servicio_num)).size;
+  const countCons = new Set([...consensusMap.values()].map(v => v.servicio_num)).size;
+  const ambCount  = [...consensusMap.values()].filter(v => v.ambiguous).length;
+
+  // Esc para cerrar
   useEffect(() => {
     const h = e => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
   }, [onClose]);
 
-  const ambiguousCount = rows.filter(r => r.ambiguous).length;
-  const totalClusters  = rows.length;
-
-  const MODEL_COLS = [
-    { key: "modelA", label: "Modelo A", sub: "Conservador",  color: "#1565C0" },
-    { key: "modelB", label: "Modelo B", sub: "Literal",      color: "#2E7D32" },
-    { key: "modelC", label: "Modelo C", sub: "Geoespacial",  color: "#6A1B9A" },
+  const MODELS = [
+    {
+      label: "Modelo A", sublabel: "Conservador", accentColor: "#1565C0",
+      points: ptsA, clusterCount: countA, ambiguousCount: 0,
+      result: resA, isConsensus: false,
+    },
+    {
+      label: "Modelo B", sublabel: "Literal", accentColor: "#2E7D32",
+      points: ptsB, clusterCount: countB, ambiguousCount: 0,
+      result: resB, isConsensus: false,
+    },
+    {
+      label: "Modelo C", sublabel: "Geoespacial", accentColor: "#6A1B9A",
+      points: ptsC, clusterCount: countC, ambiguousCount: 0,
+      result: resC, isConsensus: false,
+    },
+    {
+      label: "Consenso", sublabel: "2 de 3 modelos", accentColor: "#065F46",
+      points: ptsCons, clusterCount: countCons, ambiguousCount: ambCount,
+      result: null, isConsensus: true,
+    },
   ];
 
-  const thStyle = (color) => ({
-    padding: "8px 10px", fontSize: 9, fontWeight: 700,
-    textTransform: "uppercase", letterSpacing: ".6px",
-    color, fontFamily: "var(--mono)", textAlign: "center",
-    borderRight: "1px solid #EEF2F7", background: `${color}0A`,
-    whiteSpace: "nowrap",
-  });
-
-  const tdStyle = (color, isAmbiguous) => ({
-    padding: "7px 8px", fontSize: 10, textAlign: "center",
-    fontFamily: "var(--mono)", borderRight: "1px solid #EEF2F7",
-    color: color ?? "#213363",
-    background: isAmbiguous ? "#FFFBEB" : "transparent",
-  });
-
   return (
-    <div role="dialog" aria-modal="true"
-      style={{
-        position: "fixed", inset: 0,
-        background: "rgba(0,0,0,.55)", zIndex: 9999,
-        display: "flex", alignItems: "center", justifyContent: "center", padding: 16,
-      }}
-      onClick={onClose}>
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 9999,
+      background: "#EEF2F7",
+      display: "flex", flexDirection: "column",
+    }}>
+      {/* Header */}
       <div style={{
-        background: "#fff", borderRadius: 14, width: "100%", maxWidth: 780,
-        maxHeight: "85vh", display: "flex", flexDirection: "column",
-        boxShadow: "0 24px 64px rgba(0,0,0,.3)",
-      }}
-        onClick={e => e.stopPropagation()}>
-
-        {/* Header */}
-        <div style={{
-          padding: "16px 20px 12px", borderBottom: "1px solid #D6E0ED",
-          display: "flex", alignItems: "flex-start", justifyContent: "space-between",
-          flexShrink: 0,
-        }}>
-          <div>
-            <div style={{ fontSize: 14, fontWeight: 700, color: "#213363", marginBottom: 3 }}>
-              ⚡ Detección multi-modelo
-            </div>
-            <div style={{ fontSize: 10, color: "#6381A7" }}>
-              3 algoritmos corridos en paralelo · {totalClusters} evento{totalClusters !== 1 ? "s" : ""} detectado{totalClusters !== 1 ? "s" : ""}
-              {ambiguousCount > 0 && (
-                <span style={{ marginLeft: 8, color: "#92400E", fontWeight: 600 }}>
-                  · {ambiguousCount} ⚠ ambiguo{ambiguousCount !== 1 ? "s" : ""}
-                </span>
-              )}
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            style={{
-              background: "none", border: "none", cursor: "pointer",
-              fontSize: 18, color: "#9CA3AF", lineHeight: 1, padding: 4,
-            }}>✕</button>
+        padding: "10px 16px", background: "#213363",
+        display: "flex", alignItems: "center", gap: 12, flexShrink: 0,
+      }}>
+        <button
+          onClick={onClose}
+          style={{
+            padding: "5px 12px", borderRadius: 6, fontSize: 11,
+            border: "1px solid rgba(255,255,255,.3)", background: "transparent",
+            color: "#fff", cursor: "pointer", fontFamily: "var(--sans)",
+          }}>
+          ← Volver
+        </button>
+        <div style={{ flex: 1 }}>
+          <span style={{ fontSize: 13, fontWeight: 800, color: "#fff", fontFamily: "var(--sans)" }}>
+            ⚡ Modo comparación
+          </span>
+          <span style={{ fontSize: 10, color: "rgba(255,255,255,.6)", marginLeft: 10, fontFamily: "var(--mono)" }}>
+            3 modelos · sincronizados · elegí cuál usar
+          </span>
         </div>
-
-        {/* Legend */}
-        <div style={{
-          padding: "8px 20px", borderBottom: "1px solid #EEF2F7",
-          display: "flex", gap: 20, flexShrink: 0, background: "#F8FAFC",
-        }}>
-          {MODEL_COLS.map(m => (
-            <div key={m.key} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <span style={{
-                width: 10, height: 10, borderRadius: 2,
-                background: m.color, display: "inline-block", flexShrink: 0,
-              }}/>
-              <span style={{ fontSize: 10, fontWeight: 700, color: m.color }}>{m.label}</span>
-              <span style={{ fontSize: 9, color: "#9CA3AF" }}>— {m.sub}</span>
-            </div>
-          ))}
-          <div style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: "auto" }}>
-            <span style={{ fontSize: 10, color: "#1E7A4A", fontWeight: 600 }}>✓ consenso</span>
-            <span style={{ fontSize: 10, color: "#92400E", fontWeight: 600, marginLeft: 8 }}>⚠ ambiguo</span>
-          </div>
-        </div>
-
-        {/* Table */}
-        <div style={{ flex: 1, overflowY: "auto", overflowX: "auto" }}>
-          {rows.length === 0 ? (
-            <div style={{ padding: 32, textAlign: "center", color: "#6381A7", fontSize: 12 }}>
-              No se detectaron clusters de servicio en este viaje.
-            </div>
-          ) : (
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, tableLayout: "fixed" }}>
-              <colgroup>
-                <col style={{ width: "6%" }}/>
-                <col style={{ width: "23%" }}/>
-                <col style={{ width: "23%" }}/>
-                <col style={{ width: "23%" }}/>
-                <col style={{ width: "25%" }}/>
-              </colgroup>
-              <thead>
-                <tr style={{ position: "sticky", top: 0, zIndex: 1 }}>
-                  <th style={{ ...thStyle("#6381A7"), background: "#F8FAFC", borderRight: "1px solid #EEF2F7" }}>
-                    #
-                  </th>
-                  {MODEL_COLS.map(m => (
-                    <th key={m.key} style={thStyle(m.color)}>
-                      {m.label}<br/>
-                      <span style={{ fontSize: 8, fontWeight: 400, opacity: .7 }}>{m.sub}</span>
-                    </th>
-                  ))}
-                  <th style={{
-                    padding: "8px 10px", fontSize: 9, fontWeight: 700,
-                    textTransform: "uppercase", letterSpacing: ".6px",
-                    color: "#1E7A4A", fontFamily: "var(--mono)", textAlign: "center",
-                    background: "#F0FDF4",
-                  }}>
-                    Consenso
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((row, ri) => {
-                  const rowBg = row.ambiguous ? "#FFFBEB" : ri % 2 === 0 ? "#fff" : "#FAFBFC";
-                  const col   = svcColor(row.eventId);
-                  return (
-                    <tr key={row.eventId}
-                      style={{ borderBottom: "1px solid #EEF2F7", background: rowBg }}>
-                      {/* # */}
-                      <td style={{
-                        padding: "8px 6px", textAlign: "center", fontFamily: "var(--mono)",
-                        fontSize: 11, fontWeight: 800, color: col,
-                        borderRight: "1px solid #EEF2F7",
-                        borderLeft: `3px solid ${col}`,
-                      }}>
-                        C{row.eventId}
-                      </td>
-                      {/* Modelos */}
-                      {MODEL_COLS.map(m => (
-                        <td key={m.key} style={tdStyle(
-                          row[m.key] === "—" ? "#C4CADC" : m.color,
-                          row.ambiguous,
-                        )}>
-                          {row[m.key]}
-                        </td>
-                      ))}
-                      {/* Consenso */}
-                      <td style={{
-                        padding: "7px 10px", fontSize: 10, textAlign: "center",
-                        fontFamily: "var(--mono)", fontWeight: 700,
-                        color: row.ambiguous ? "#92400E" : "#1E7A4A",
-                        background: row.ambiguous ? "#FEF3C7" : "#F0FDF4",
-                      }}>
-                        {row.consensus}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          )}
-        </div>
-
-        {/* Footer / actions */}
-        <div style={{
-          padding: "12px 20px", borderTop: "1px solid #D6E0ED",
-          display: "flex", alignItems: "center", gap: 10, flexShrink: 0,
-          background: "#F8FAFC",
-        }}>
-          {ambiguousCount > 0 && (
-            <span style={{
-              fontSize: 10, color: "#92400E", background: "#FEF3C7",
-              padding: "4px 10px", borderRadius: 5, fontWeight: 600,
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          {[
+            { label: "Mod. A", color: "#1565C0", count: countA },
+            { label: "Mod. B", color: "#2E7D32", count: countB },
+            { label: "Mod. C", color: "#6A1B9A", count: countC },
+            { label: "Consenso", color: "#065F46", count: countCons },
+          ].map(m => (
+            <span key={m.label} style={{
+              fontSize: 9, fontFamily: "var(--mono)", color: "#fff",
+              background: m.color, padding: "3px 8px", borderRadius: 10, fontWeight: 700,
             }}>
-              ⚠ {ambiguousCount} evento{ambiguousCount !== 1 ? "s" : ""} ambiguo{ambiguousCount !== 1 ? "s" : ""} — quedarán resaltados para revisión
+              {m.label}: {m.count}
+            </span>
+          ))}
+          {ambCount > 0 && (
+            <span style={{
+              fontSize: 9, fontFamily: "var(--mono)", color: "#92400E",
+              background: "#FEF3C7", padding: "3px 8px", borderRadius: 10, fontWeight: 700,
+            }}>
+              ⚠ {ambCount} ambiguo{ambCount !== 1 ? "s" : ""}
             </span>
           )}
-          <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-            <button
-              onClick={onClose}
-              style={{
-                padding: "8px 16px", borderRadius: 7, border: "1px solid #D6E0ED",
-                background: "#fff", color: "#6381A7", fontSize: 11,
-                cursor: "pointer", fontFamily: "var(--sans)",
-              }}>
-              Cancelar
-            </button>
-            <button
-              onClick={() => onApply(consensusMap)}
-              style={{
-                padding: "8px 18px", borderRadius: 7, border: "none",
-                background: "#16A34A", color: "#fff", fontSize: 11,
-                fontWeight: 700, cursor: "pointer", fontFamily: "var(--sans)",
-              }}>
-              ✓ Usar consenso
-            </button>
-          </div>
         </div>
+      </div>
+
+      {/* Grid 2×2 */}
+      <div style={{
+        flex: 1, minHeight: 0,
+        display: "grid",
+        gridTemplateColumns: "1fr 1fr",
+        gridTemplateRows: "1fr 1fr",
+        gap: 8, padding: 8,
+      }}>
+        {MODELS.map((m, idx) => (
+          <SyncedMapView
+            key={m.label}
+            label={m.label}
+            sublabel={m.sublabel}
+            accentColor={m.accentColor}
+            points={m.points}
+            clusterCount={m.clusterCount}
+            ambiguousCount={m.ambiguousCount}
+            mapRefs={mapRefs}
+            ownIdx={idx}
+            onUse={() => onApply(m.isConsensus ? null : m.result, consensusMap, m.isConsensus, false)}
+            onEdit={() => onApply(m.isConsensus ? null : m.result, consensusMap, m.isConsensus, true)}
+          />
+        ))}
       </div>
     </div>
   );
 }
+
 
 // ─── COMPONENTE PRINCIPAL ─────────────────────────────────────────────────────
 export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) {
@@ -1108,7 +1308,7 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
   const [resetRunning, setResetRunning] = useState(false);
   const [highlightNum,  setHighlightNum]  = useState(null); // cluster num seleccionado
   const [zoomTarget,    setZoomTarget]    = useState(null); // array de puntos para zoom
-  const [consensusData, setConsensusData] = useState(null); // {points} para el modal
+  const [comparisonMode, setComparisonMode] = useState(false); // grilla 4 mapas
 
   const trip   = trips?.[tripIdx] ?? null;
   const points = trip?.points ?? [];
@@ -1120,6 +1320,7 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
     setLabelEditing(null);
     setHighlightNum(null);
     setZoomTarget(null);
+    setComparisonMode(false);
   }, []);
 
   const goNextPending = useCallback(() => {
@@ -1267,74 +1468,69 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
     }
   }, [trips, tripIdx, setTrips]);
 
-  // ─── AUTO-DETECTAR → abre modal de consenso ──────────────────────────────
+  // ─── AUTO-DETECTAR → abre Modo Comparación ──────────────────────────────
   const handleAutoDetect = useCallback(() => {
     const ct = trips[tripIdx];
-    if (!ct) return;
-    setConsensusData({ points: ct.points });
+    if (!ct || !ct.points?.length) return;
+    setComparisonMode(true);
   }, [trips, tripIdx]);
 
-  // ─── APLICAR CONSENSO (desde el modal) ───────────────────────────────────
+  // ─── APLICAR MODELO (desde ComparisonMode) ──────────────────────────────
+  // modelResult: Array<{origIdx, servicio_num}> | null (null = consenso)
   // consensusMap: Map<origIdx, {servicio_num, ambiguous}>
-  const handleApplyConsensus = useCallback(async (consensusMap) => {
+  // isConsensus: bool — si true, usa consensusMap en vez de modelResult
+  // editMode: bool — si false, escribe en Supabase; si true, solo carga en editor
+  const handleApplyModel = useCallback(async (modelResult, consensusMap, isConsensus, editMode) => {
     const ct = trips[tripIdx];
     if (!ct) return;
 
-    setConsensusData(null);
+    setComparisonMode(false);
     setAutoRunning(true);
 
     try {
-      const zcPts = ct.points
-        .map((p, i) => ({ p, i }))
-        .filter(({ p }) => p.zone === "ZONA_COMUN");
+      const zcPts = ct.points.map((p, i) => ({ p, i })).filter(({ p }) => p.zone === "ZONA_COMUN");
 
-      // Construir updates completo (igual que handleAutoDetect original)
-      const updates = {}; // origIdx → {state, servicio_num, ambiguous}
+      // Construir mapa origIdx → {state, servicio_num, ambiguous}
+      const updates = {};
 
-      // Aplicar asignaciones del consenso
-      consensusMap.forEach(({ servicio_num, ambiguous }, origIdx) => {
-        updates[origIdx] = { state: null, servicio_num, ambiguous: ambiguous ?? false };
-      });
+      if (isConsensus) {
+        consensusMap.forEach(({ servicio_num, ambiguous }, origIdx) => {
+          updates[origIdx] = { state: null, servicio_num, ambiguous: ambiguous ?? false };
+        });
+      } else {
+        // modelResult: Array<{origIdx, servicio_num}>
+        modelResult.forEach(({ origIdx, servicio_num }) => {
+          updates[origIdx] = { state: null, servicio_num, ambiguous: false };
+        });
+      }
 
-      // Puntos ZC no asignados por el consenso (SOG alto, sin cluster)
+      // ZC no asignados → TRANSITO
       zcPts.forEach(({ p, i }) => {
         if (updates[i]) return;
-        if (p.sog != null && p.sog >= 4) {
-          updates[i] = { state: "TRANSITO", servicio_num: null, ambiguous: false };
-        }
+        updates[i] = { state: "TRANSITO", servicio_num: null, ambiguous: false };
       });
 
       // ENTRADA / SALIDA de zona
-      if (zcPts.length > 0) {
-        const firstIdx = zcPts[0].i;
-        if (!updates[firstIdx]) updates[firstIdx] = { state: "ENTRADA_ZONA", servicio_num: null, ambiguous: false };
-      }
-      if (zcPts.length > 1) {
-        const lastIdx = zcPts[zcPts.length - 1].i;
-        if (!updates[lastIdx]) updates[lastIdx] = { state: "SALIDA_ZONA", servicio_num: null, ambiguous: false };
-      }
+      if (zcPts.length > 0 && !updates[zcPts[0].i])
+        updates[zcPts[0].i] = { state: "ENTRADA_ZONA", servicio_num: null, ambiguous: false };
+      if (zcPts.length > 1 && !updates[zcPts[zcPts.length-1].i])
+        updates[zcPts[zcPts.length-1].i] = { state: "SALIDA_ZONA", servicio_num: null, ambiguous: false };
 
-      // Todos los puntos: ZARPE / TRANSITO / LLEGADA
+      // ZARPE / LLEGADA / TRANSITO para el resto
       ct.points.forEach((p, i) => {
-        if (i === 0) {
-          updates[i] = { state: "ZARPE", servicio_num: null, ambiguous: false };
-        } else if (i === ct.points.length - 1) {
-          updates[i] = { state: "LLEGADA", servicio_num: null, ambiguous: false };
-        } else if (!updates[i]) {
-          updates[i] = { state: "TRANSITO", servicio_num: null, ambiguous: false };
-        }
+        if (i === 0)                      updates[i] = { state: "ZARPE",    servicio_num: null, ambiguous: false };
+        else if (i === ct.points.length-1) updates[i] = { state: "LLEGADA",  servicio_num: null, ambiguous: false };
+        else if (!updates[i])             updates[i] = { state: "TRANSITO", servicio_num: null, ambiguous: false };
       });
 
-      // Aplicar localmente — los puntos ambiguos quedan con servicio_num asignado
-      // pero se marcan con tipo_servicio = null para que la tabla los resalte en amarillo.
       const newPoints = ct.points.map((p, i) => {
-        if (!updates[i]) return p;
         const u = updates[i];
+        if (!u) return p;
         return {
           ...p,
           state:        u.state,
           servicio_num: u.servicio_num,
-          // Si es ambiguo y tiene servicio_num, limpiar tipo_servicio para forzar revisión
+          // Ambiguos (consenso): limpiar tipo_servicio para forzar revisión manual
           tipo_servicio: (u.ambiguous && u.servicio_num != null) ? null : p.tipo_servicio,
         };
       });
@@ -1345,48 +1541,56 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
       );
       setTrips(newTrips);
 
-      // Escribir en Supabase
+      // Si es editMode, solo cargar — no escribir en Supabase todavía
+      if (editMode) {
+        const ambCount = [...(isConsensus ? consensusMap.values() : [])].filter(v => v.ambiguous).length;
+        showToast(
+          ambCount > 0
+            ? `${nSvc} cluster${nSvc!==1?"s":""} cargados · ${ambCount} ⚠ para revisar`
+            : `${nSvc} cluster${nSvc!==1?"s":""} listos para editar`,
+          "info"
+        );
+        return;
+      }
+
+      // Usar → escribir en Supabase
       if (ct.supabaseId) {
         const byKey = {};
-        Object.entries(updates).forEach(([origIdxStr, upd]) => {
-          const p = ct.points[parseInt(origIdxStr, 10)];
+        Object.entries(updates).forEach(([idxStr, upd]) => {
+          const p   = ct.points[parseInt(idxStr, 10)];
           const key = `${upd.state ?? "NULL"}__${upd.servicio_num ?? "NULL"}`;
           if (!byKey[key]) byKey[key] = { state: upd.state, servicio_num: upd.servicio_num, dts: [] };
           byKey[key].dts.push(
             p.datetime instanceof Date ? p.datetime.toISOString() : new Date(p.datetime).toISOString()
           );
         });
-
         for (const { state, servicio_num, dts } of Object.values(byKey)) {
           const { error } = await supabase
-            .from("ais_points")
-            .update({ state, servicio_num })
-            .eq("trip_id", ct.supabaseId)
-            .in("datetime", dts);
+            .from("ais_points").update({ state, servicio_num })
+            .eq("trip_id", ct.supabaseId).in("datetime", dts);
           if (error) throw error;
         }
-
         const { error: errTrip } = await supabase
-          .from("ais_trips")
-          .update({ n_services: nSvc })
-          .eq("id", ct.supabaseId);
+          .from("ais_trips").update({ n_services: nSvc }).eq("id", ct.supabaseId);
         if (errTrip) throw errTrip;
       }
 
-      const ambCount = [...consensusMap.values()].filter(v => v.ambiguous).length;
+      const ambCount = isConsensus ? [...consensusMap.values()].filter(v => v.ambiguous).length : 0;
       showToast(
         ambCount > 0
-          ? `${nSvc} cluster${nSvc !== 1 ? "s" : ""} aplicados · ${ambCount} ⚠ ambiguo${ambCount !== 1 ? "s" : ""} para revisión`
-          : `${nSvc} cluster${nSvc !== 1 ? "s" : ""} detectados ✓`,
+          ? `${nSvc} cluster${nSvc!==1?"s":""} aplicados · ${ambCount} ⚠ ambiguo${ambCount!==1?"s":""} para revisión`
+          : `${nSvc} cluster${nSvc!==1?"s":""} detectados ✓`,
         ambCount > 0 ? "info" : "ok"
       );
     } catch (e) {
-      console.error("[TripViewer] Error aplicando consenso:", e?.message ?? e);
-      showToast("Error al aplicar consenso", "error");
+      console.error("[TripViewer] Error aplicando modelo:", e?.message ?? e);
+      showToast("Error al aplicar modelo", "error");
     } finally {
       setAutoRunning(false);
     }
   }, [trips, tripIdx, setTrips]);
+
+  // ─── RESET
 
   // ─── RESET ───────────────────────────────────────────────────────────────────
   const handleReset = useCallback(async () => {
@@ -1560,13 +1764,13 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
         <div style={{marginLeft:"auto",display:"flex",gap:6,alignItems:"center"}}>
           <button
             onClick={handleAutoDetect}
-            disabled={autoRunning}
+            disabled={autoRunning || comparisonMode}
             style={{
               fontSize:11,padding:"5px 12px",borderRadius:6,border:"1px solid #B8942A",
               background:autoRunning?"#FEF3C7":"#FFFBEB",color:"#92400E",
               cursor:autoRunning?"not-allowed":"pointer",fontWeight:600,fontFamily:"var(--sans)",
             }}>
-            {autoRunning ? "⏳ Aplicando…" : "⚡ Auto-detectar"}
+            {autoRunning ? "⏳ Aplicando…" : comparisonMode ? "⚡ Comparando…" : "⚡ Auto-detectar"}
           </button>
 
           <button
@@ -1833,12 +2037,12 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
         </div>
       </div>
 
-      {/* Modal de consenso multi-modelo */}
-      {consensusData && (
-        <ConsensusModal
-          points={consensusData.points}
-          onApply={handleApplyConsensus}
-          onClose={() => setConsensusData(null)}
+      {/* Modo comparación — 4 mapas sincronizados */}
+      {comparisonMode && (
+        <ComparisonMode
+          rawPoints={points}
+          onApply={handleApplyModel}
+          onClose={() => setComparisonMode(false)}
         />
       )}
 
