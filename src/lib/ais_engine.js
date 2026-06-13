@@ -861,3 +861,104 @@ export function aggregateProjected(trips, modelKey) {
     opsProjected: opsPrj,
   };
 }
+
+// ─── CALIBRATION AGGREGATION ──────────────────────────────────────────────────
+/**
+ * aggregateCalibration(trips)
+ *
+ * Para cada modelo (A, B, C, consenso), calcula:
+ *   - detectedAll:       servicios detectados en TODOS los viajes
+ *   - detectedValidated: servicios detectados en viajes validados (por el modelo)
+ *   - realValidated:     servicios reales en viajes validados (clasificación manual)
+ *   - uncatalogued:      detectedAll - detectedValidated  (solo pendientes)
+ *   - error:             detectedValidated - realValidated (0 = modelo perfecto)
+ *   - opsValidated:      conteo por tipo de los servicios reales validados
+ *
+ * La lógica:
+ *   uncatalogued = total detectado - lo que el modelo detecta en los ya-validados
+ *   Así se puede ver: "para los viajes que YA validé, ¿cuántos detectó el modelo
+ *   vs cuántos hay realmente?" — eso muestra la precisión del modelo.
+ */
+export function aggregateCalibration(trips) {
+  const MODEL_KEYS = ["A", "B", "C", "cons"];
+
+  // Helper: contar servicios únicos en un modelResult
+  const countSvcs = (modelResult) =>
+    new Set(modelResult.map(r => r.servicio_num)).size;
+
+  // Helper: correr modelo sobre puntos
+  const runModel = (key, points) => {
+    if (key === "A")    return runModelA(points);
+    if (key === "B")    return runModelB(points);
+    if (key === "C")    return runModelC(points);
+    // consenso
+    const rA = runModelA(points), rB = runModelB(points), rC = runModelC(points);
+    const cMap = buildConsensus(points, rA, rB, rC);
+    // Convertir consensusMap a formato Array<{origIdx, servicio_num}>
+    const result = [];
+    cMap.forEach(({ servicio_num }, origIdx) => result.push({ origIdx, servicio_num }));
+    return result;
+  };
+
+  // Conteos por modelo
+  const detectedAll       = { A:0, B:0, C:0, cons:0 };
+  const detectedValidated = { A:0, B:0, C:0, cons:0 };
+
+  // Servicios reales (clasificación manual) en viajes validados
+  let realValidated = 0;
+  const emptyOps = () => ({ agua_zc:0, slop_zc:0, lub_zc:0, alijo_zc:0, alijo_za:0, alijo_zd:0 });
+  const opsValidated = emptyOps();
+
+  for (const trip of trips) {
+    if (!trip.points?.length) continue;
+
+    // Correr los 4 modelos sobre este viaje
+    for (const key of MODEL_KEYS) {
+      const res = runModel(key, trip.points);
+      const n   = countSvcs(res);
+      detectedAll[key] += n;
+      if (trip.validated) detectedValidated[key] += n;
+    }
+
+    // Si está validado: contar servicios reales
+    if (trip.validated) {
+      const byNum = {};
+      for (const pt of trip.points) {
+        if (pt.servicio_num == null) continue;
+        if (!byNum[pt.servicio_num]) byNum[pt.servicio_num] = [];
+        byNum[pt.servicio_num].push(pt);
+      }
+      for (const pts of Object.values(byNum)) {
+        realValidated++;
+        // Tipo dominante
+        const typeCount = {};
+        for (const pt of pts) {
+          const t = pt?.tipo_servicio;
+          if (t && t !== "SIN_CLASIFICAR" && t !== "BORRADO")
+            typeCount[t] = (typeCount[t] || 0) + 1;
+        }
+        const dominant = Object.entries(typeCount).sort((a,b)=>b[1]-a[1])[0]?.[0];
+        if (dominant) {
+          const plRow = SERVICE_TYPES[dominant]?.plRow;
+          if (plRow && opsValidated[plRow] !== undefined) opsValidated[plRow]++;
+        }
+      }
+    }
+  }
+
+  // Construir resultado por modelo
+  const models = {};
+  for (const key of MODEL_KEYS) {
+    const uncatalogued = detectedAll[key] - detectedValidated[key];
+    const error        = detectedValidated[key] - realValidated;
+    models[key] = {
+      detectedAll:       detectedAll[key],
+      detectedValidated: detectedValidated[key],
+      uncatalogued:      Math.max(0, uncatalogued), // nunca negativo
+      error,                                         // + = sobreestima, - = subestima
+      total:             uncatalogued + realValidated,
+    };
+  }
+
+  return { models, realValidated, opsValidated };
+}
