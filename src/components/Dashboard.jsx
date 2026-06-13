@@ -301,6 +301,156 @@ function CalibrationTable({ calib }) {
   );
 }
 
+
+// ─── MODEL EXPLAINER ─────────────────────────────────────────────────────────
+// Sección educativa al pie del dashboard. Explica cada modelo con el viaje 8
+// como ejemplo real (datos extraídos del modo comparación).
+function ModelExplainer() {
+  const VIAJE8 = {
+    id: 8,
+    rango: "21/08/24 15:04 → 22/08/24 18:11 ART (1d 3h)",
+    modelos: [
+      {
+        key: "A", label: "Modelo A", sub: "Conservador", color: "#1565C0",
+        clusters: 7,
+        logica: "Si el gap entre dos paradas es menor a 60 min, las fusiona en un mismo servicio. Puntos con SOG alto dentro de zona se absorben al cluster anterior.",
+        ejemplo: "Detecta 7 clusters. Fusiona agresivamente: el período 23:38→02:09 (casi 3hs con gaps internos) queda como un solo C4 porque los gaps entre puntos son menores a 60min.",
+        pros: "Útil cuando el barco hace múltiples contactos rápidos con el mismo buque.",
+        cons: "Puede sobrecontar si hay servicios distintos separados por menos de 60 min.",
+      },
+      {
+        key: "B", label: "Modelo B", sub: "Literal", color: "#2E7D32",
+        clusters: 3,
+        logica: "Solo marca como cluster los puntos con SOG < 4 kn. Corta el cluster si el gap supera 90 min o si el barco se aleja más de 0.5nm del centroide del grupo.",
+        ejemplo: "Detecta 3 clusters. Agrupa todo el período 18:16→21:01 como C1 (gap < 90min), luego 22:12/23:38 como C2, y el bloque nocturno 01:13→05:19 como C3.",
+        pros: "Comportamiento predecible, basado estrictamente en velocidad. Es el algoritmo actual del sistema.",
+        cons: "Puede fusionar servicios distintos que estuvieron seguidos sin pausa larga.",
+      },
+      {
+        key: "C", label: "Modelo C", sub: "Geoespacial", color: "#6A1B9A",
+        clusters: 6,
+        logica: "Ignora el tiempo completamente. Agrupa puntos que estén a menos de 500m entre sí dentro de zona, sin importar el gap temporal.",
+        ejemplo: "Detecta 6 clusters. Separa más que B porque los puntos de las 22:12 y las 01:13 están físicamente en lugares distintos, aunque B los hubiera agrupado por proximidad temporal.",
+        pros: "Excelente para detectar servicios a distintos buques en posiciones diferentes.",
+        cons: "Puede crear clusters falsos si el barco se aleja momentáneamente y vuelve.",
+      },
+      {
+        key: "cons", label: "Consenso", sub: "2 de 3 modelos", color: "#065F46",
+        clusters: 6,
+        logica: "Para cada par de puntos, cuenta en cuántos modelos aparecen agrupados juntos. Si ≥ 2 de 3 coinciden, van al mismo cluster. Si los 3 difieren, el punto queda marcado como ambiguo ⚠.",
+        ejemplo: "Detecta 6 clusters — coincide con Modelo C. El período 23:38→02:09 que A agrupa en 1 y B/C separan, termina siendo separado porque 2 de 3 modelos lo dividen.",
+        pros: "Reduce el impacto de un modelo mal calibrado. El resultado suele ser el más robusto.",
+        cons: "Si los 3 modelos difieren sistemáticamente, muchos puntos quedan como ambiguos.",
+      },
+    ],
+  };
+
+  return (
+    <div style={{marginTop:24,marginBottom:8}}>
+      {/* Header */}
+      <div style={{marginBottom:14}}>
+        <div style={{fontFamily:"var(--mono)",fontSize:9,letterSpacing:2,
+                     color:"var(--muted)",textTransform:"uppercase",marginBottom:4}}>
+          Guía de modelos
+        </div>
+        <div style={{fontSize:14,fontWeight:700,color:"var(--navy)",marginBottom:2}}>
+          ¿Cómo funciona cada algoritmo de detección?
+        </div>
+        <div style={{fontSize:11,color:"#6381A7",lineHeight:1.6}}>
+          Ejemplo con{" "}
+          <strong style={{color:"var(--navy)"}}>Viaje #{VIAJE8.id}</strong>
+          {" "}—{" "}
+          <span style={{fontFamily:"var(--mono)",fontSize:10}}>{VIAJE8.rango}</span>
+        </div>
+      </div>
+
+      {/* Cards */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+        {VIAJE8.modelos.map(m => (
+          <div key={m.key} style={{
+            background:"#fff",border:"1px solid #D6E0ED",borderRadius:10,
+            overflow:"hidden",borderTop:`3px solid ${m.color}`,
+          }}>
+            {/* Card header */}
+            <div style={{padding:"10px 14px 8px",
+                         borderBottom:"1px solid #EEF2F7",
+                         display:"flex",alignItems:"center",
+                         justifyContent:"space-between"}}>
+              <div>
+                <span style={{fontSize:12,fontWeight:800,color:m.color,
+                               fontFamily:"var(--sans)"}}>{m.label}</span>
+                <span style={{fontSize:10,color:"#A5B5CC",marginLeft:6,
+                               fontFamily:"var(--mono)"}}>{m.sub}</span>
+              </div>
+              <span style={{
+                fontSize:11,fontWeight:800,fontFamily:"var(--mono)",
+                color:"#fff",background:m.color,
+                padding:"2px 10px",borderRadius:8,
+              }}>
+                {m.clusters} C · Viaje {VIAJE8.id}
+              </span>
+            </div>
+
+            {/* Card body */}
+            <div style={{padding:"10px 14px",display:"flex",flexDirection:"column",gap:8}}>
+              {/* Lógica */}
+              <div>
+                <div style={{fontSize:8,fontWeight:700,color:"#6381A7",
+                             textTransform:"uppercase",letterSpacing:".8px",
+                             fontFamily:"var(--mono)",marginBottom:3}}>
+                  Lógica
+                </div>
+                <div style={{fontSize:11,color:"#213363",lineHeight:1.6}}>
+                  {m.logica}
+                </div>
+              </div>
+
+              {/* Ejemplo */}
+              <div style={{background:`${m.color}08`,borderRadius:6,
+                           padding:"8px 10px",borderLeft:`2px solid ${m.color}44`}}>
+                <div style={{fontSize:8,fontWeight:700,color:m.color,
+                             textTransform:"uppercase",letterSpacing:".8px",
+                             fontFamily:"var(--mono)",marginBottom:3}}>
+                  Viaje {VIAJE8.id} — resultado
+                </div>
+                <div style={{fontSize:11,color:"#213363",lineHeight:1.6}}>
+                  {m.ejemplo}
+                </div>
+              </div>
+
+              {/* Pros / Cons */}
+              <div style={{display:"flex",gap:8}}>
+                <div style={{flex:1,background:"#F0FDF4",borderRadius:5,
+                             padding:"6px 8px"}}>
+                  <div style={{fontSize:8,fontWeight:700,color:"#1E7A4A",
+                               textTransform:"uppercase",fontFamily:"var(--mono)",
+                               marginBottom:2}}>✓ Útil cuando</div>
+                  <div style={{fontSize:10,color:"#1E7A4A",lineHeight:1.5}}>{m.pros}</div>
+                </div>
+                <div style={{flex:1,background:"#FFF7ED",borderRadius:5,
+                             padding:"6px 8px"}}>
+                  <div style={{fontSize:8,fontWeight:700,color:"#92400E",
+                               textTransform:"uppercase",fontFamily:"var(--mono)",
+                               marginBottom:2}}>⚠ Ojo con</div>
+                  <div style={{fontSize:10,color:"#92400E",lineHeight:1.5}}>{m.cons}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Nota al pie */}
+      <div style={{marginTop:10,padding:"8px 12px",background:"#F8FAFC",
+                   borderRadius:6,fontSize:9,color:"#A5B5CC",
+                   fontFamily:"var(--mono)",lineHeight:1.6}}>
+        Los datos del Viaje #8 son reales — extraídos del modo comparación del AIS Analyzer.
+        Los resultados varían por viaje según la densidad de puntos, gaps temporales y posición geográfica.
+      </div>
+    </div>
+  );
+}
+
 // ─── COMPONENTE PRINCIPAL ─────────────────────────────────────────────────────
 export default function Dashboard({ data, onGoTrips, onGoUpload, firstPendingTrip, onGoFirstPending }) {
 
@@ -420,6 +570,7 @@ export default function Dashboard({ data, onGoTrips, onGoUpload, firstPendingTri
 
       {/* Tabla de calibración */}
       {calib && <CalibrationTable calib={calib} />}
+      {calib && <ModelExplainer />}
 
       {/* Impacto FSV */}
       {revenueExtra > 0 && (
