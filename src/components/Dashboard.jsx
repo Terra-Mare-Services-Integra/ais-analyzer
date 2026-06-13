@@ -10,7 +10,7 @@ const SVC_ROWS = [
   { key:"alijo_za", label:"Alijo — Zona Alfa",  color:"#673AB7" },
   { key:"alijo_zd", label:"Alijo — Zona Delta", color:"#3F51B5" },
 ];
-A
+
 const MODEL_COLS = [
   { key:"A",    label:"Modelo A", sub:"Conservador",  color:"#1565C0" },
   { key:"B",    label:"Modelo B", sub:"Literal",      color:"#2E7D32" },
