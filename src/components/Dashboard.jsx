@@ -10,6 +10,13 @@ const SVC_ROWS = [
   { key:"alijo_zd", label:"Alijo — Zona Delta", color:"#3F51B5" },
 ];
 
+const MODEL_COLS = [
+  { key: "A",    label: "Mod. A", sub: "Conservador",  color: "#1565C0" },
+  { key: "B",    label: "Mod. B", sub: "Literal",      color: "#2E7D32" },
+  { key: "C",    label: "Mod. C", sub: "Geoespacial",  color: "#6A1B9A" },
+  { key: "cons", label: "Consenso", sub: "2 de 3",     color: "#065F46" },
+];
+
 function fmtDateRange(trips) {
   if (!trips?.length) return null;
   const times = trips.flatMap(t=>[t.dateStart,t.dateEnd]).filter(Boolean).map(d=>d instanceof Date?d.getTime():new Date(d).getTime());
@@ -107,11 +114,11 @@ export default function Dashboard({ data, onGoTrips, onGoUpload, firstPendingTri
         ))}
       </div>
 
-      {/* Breakdown operaciones */}
-      <div style={{background:"#fff",border:"1px solid #D6E0ED",borderRadius:10,overflow:"hidden",marginBottom:20}}>
+      {/* Breakdown operaciones — clasificación manual */}
+      <div style={{background:"#fff",border:"1px solid #D6E0ED",borderRadius:10,overflow:"hidden",marginBottom:16}}>
         <div style={{padding:"10px 16px",borderBottom:"1px solid #EEF2F7",fontFamily:"var(--mono)",fontSize:9,fontWeight:600,color:"#6381A7",textTransform:"uppercase",letterSpacing:1,display:"flex",justifyContent:"space-between"}}>
           <span>Operaciones validadas por tipo</span>
-          <span style={{fontSize:9,color:"#A5B5CC",fontWeight:400}}>solo viajes validados</span>
+          <span style={{fontSize:9,color:"#A5B5CC",fontWeight:400}}>clasificación manual · solo viajes validados</span>
         </div>
         {SVC_ROWS.map((s,idx)=>{
           const barPct = maxOp>0?(kpis.ops[s.key]/maxOp)*100:0;
@@ -133,6 +140,90 @@ export default function Dashboard({ data, onGoTrips, onGoUpload, firstPendingTri
           return <div style={{padding:"8px 16px",background:"#FAFAFA",fontSize:11,color:"#9E9E9E",fontFamily:"var(--mono)",borderTop:"1px solid #EEF2F7"}}>+ {unc} servicio{unc>1?"s":""} sin clasificar</div>;
         })()}
       </div>
+
+      {/* Breakdown por modelo de detección automática */}
+      {kpis.models && (
+        <div style={{background:"#fff",border:"1px solid #D6E0ED",borderRadius:10,overflow:"hidden",marginBottom:20}}>
+          {/* Header */}
+          <div style={{padding:"10px 16px",borderBottom:"1px solid #EEF2F7",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+            <span style={{fontFamily:"var(--mono)",fontSize:9,fontWeight:600,color:"#6381A7",textTransform:"uppercase",letterSpacing:1}}>
+              Detección automática — comparativa por modelo
+            </span>
+            <div style={{display:"flex",gap:10}}>
+              {MODEL_COLS.map(m=>(
+                <span key={m.key} style={{fontSize:8,fontFamily:"var(--mono)",color:m.color,fontWeight:700}}>
+                  {m.label} <span style={{fontWeight:400,color:"#A5B5CC"}}>{m.sub}</span>
+                </span>
+              ))}
+            </div>
+          </div>
+
+          {/* Tabla: una fila por tipo de servicio + fila totales */}
+          <div style={{overflowX:"auto"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:11,tableLayout:"fixed"}}>
+              <colgroup>
+                <col style={{width:"28%"}}/>
+                {MODEL_COLS.map(m=><col key={m.key} style={{width:`${72/MODEL_COLS.length}%`}}/>)}
+              </colgroup>
+              <thead>
+                <tr style={{background:"#F8FAFC",borderBottom:"1px solid #EEF2F7"}}>
+                  <th style={{padding:"6px 14px",textAlign:"left",fontSize:9,color:"#6381A7",fontWeight:600,fontFamily:"var(--mono)",textTransform:"uppercase",letterSpacing:".6px"}}>
+                    Tipo
+                  </th>
+                  {MODEL_COLS.map(m=>(
+                    <th key={m.key} style={{padding:"6px 8px",textAlign:"center",fontSize:9,fontWeight:700,fontFamily:"var(--mono)",color:m.color,borderLeft:"1px solid #EEF2F7",background:`${m.color}08`}}>
+                      {m.label}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {SVC_ROWS.map((s,idx)=>{
+                  const maxVal = Math.max(...MODEL_COLS.map(m => kpis.models[m.key]?.ops[s.key] ?? 0), 1);
+                  return (
+                    <tr key={s.key} style={{borderBottom:idx<SVC_ROWS.length-1?"1px solid #F5F7FA":"none"}}>
+                      <td style={{padding:"7px 14px",fontSize:11,color:"#6381A7"}}>{s.label}</td>
+                      {MODEL_COLS.map(m=>{
+                        const val = kpis.models[m.key]?.ops[s.key] ?? 0;
+                        const pct = maxVal>0?(val/maxVal)*100:0;
+                        const isCons = m.key==="cons";
+                        return (
+                          <td key={m.key} style={{padding:"5px 8px",borderLeft:"1px solid #EEF2F7",background:isCons?`${m.color}06`:"transparent"}}>
+                            <div style={{display:"flex",alignItems:"center",gap:5}}>
+                              <div style={{flex:1,height:5,background:"#EEF2F7",borderRadius:3,overflow:"hidden"}}>
+                                <div style={{width:`${pct}%`,height:"100%",background:m.color,borderRadius:3,minWidth:val>0?3:0}}/>
+                              </div>
+                              <span style={{fontFamily:"var(--mono)",fontSize:12,fontWeight:700,color:val>0?m.color:"#D6E0ED",width:18,textAlign:"right",flexShrink:0}}>{val}</span>
+                            </div>
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  );
+                })}
+              </tbody>
+              <tfoot>
+                <tr style={{borderTop:"2px solid #D6E0ED",background:"#F8FAFC"}}>
+                  <td style={{padding:"7px 14px",fontSize:10,fontWeight:700,color:"#213363",fontFamily:"var(--mono)"}}>TOTAL</td>
+                  {MODEL_COLS.map(m=>{
+                    const val = kpis.models[m.key]?.total ?? 0;
+                    const isCons = m.key==="cons";
+                    return (
+                      <td key={m.key} style={{padding:"7px 8px",textAlign:"center",borderLeft:"1px solid #D6E0ED",background:isCons?`${m.color}10`:"transparent"}}>
+                        <span style={{fontFamily:"var(--mono)",fontSize:14,fontWeight:800,color:val>0?m.color:"#D6E0ED"}}>{val}</span>
+                      </td>
+                    );
+                  })}
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+
+          <div style={{padding:"7px 14px",background:"#F8FAFC",borderTop:"1px solid #EEF2F7",fontSize:9,color:"#A5B5CC",fontFamily:"var(--mono)"}}>
+            Tipo inferido del <code>tipo_servicio</code> guardado en cada punto. Consenso = mayoría (≥2 de 3 modelos).
+          </div>
+        </div>
+      )}
 
       {/* Impacto */}
       {revenueExtra>0&&(
