@@ -314,21 +314,21 @@ function ModelExplainer() {
     modelos: [
       {
         key: "A", label: "Modelo A", sub: "Conservador", color: "#1565C0",
-        clusters: 7,
-        // C1(18:16/19:09) C2(20:36/21:01) C3(22:12) C4(23:38/00:24/01:13/02:09) C5(03:00) C6(04:19) C7(05:19/06:00)
+        clusters: 6,
+        // Nueva lógica: Regla 1 descarta punto único (00:24 SOG 8.5kn), Regla 2 fusiona por dist+gap
         detalle: [
           { c:"C1", horas:"18:16 / 19:09" },
           { c:"C2", horas:"20:36 / 21:01" },
-          { c:"C3", horas:"22:12" },
-          { c:"C4", horas:"23:38 / 00:24 / 01:13 / 02:09", destaca: true },
-          { c:"C5", horas:"03:00" },
-          { c:"C6", horas:"04:19" },
-          { c:"C7", horas:"05:19 / 06:00" },
+          { c:"C3", horas:"22:12 / 23:38" },
+          { c:"—",  horas:"00:24 (SOG 8.5kn) → Tránsito", destaca: true },
+          { c:"C4", horas:"01:13 / 02:09" },
+          { c:"C5", horas:"03:09 / 04:19 / 05:19" },
+          { c:"C6", horas:"06:00" },
         ],
-        logica: "Fusiona agresivamente: si el gap entre dos paradas es < 60 min, las une en el mismo cluster. Los puntos con SOG alto dentro de zona se absorben al cluster precedente.",
-        ejemplo: "El punto de las 00:24 (SOG 8.5kn) queda dentro de C4 porque el gap con 23:38 es < 60min. Resultado: 7 clusters — el más fragmentado.",
-        pros: "Capta múltiples contactos rápidos con el mismo buque sin perder ninguno.",
-        cons: "Sobreestima si dos servicios distintos ocurren con menos de 60 min de separación.",
+        logica: "Regla 1: clusters de punto único → Tránsito (un solo registro no es evidencia de estadía real). Regla 2: dos clusters consecutivos se fusionan SOLO si distancia entre sus extremos < 500m Y gap temporal < 2hs — ambas condiciones simultáneamente.",
+        ejemplo: "El punto de las 00:24 (SOG 8.5kn) es el único candidato en ese período → Regla 1 lo descarta como Tránsito. C3 y C4 no se fusionan porque están en posiciones distintas. Resultado: 6 clusters en lugar de 7.",
+        pros: "Elimina falsos positivos de punto único y fusiona estadías partidas por pérdida de señal AIS.",
+        cons: "Requiere calibrar los parámetros (500m / 2hs) según el dataset — pueden variar por zona operativa.",
       },
       {
         key: "B", label: "Modelo B", sub: "Literal", color: "#2E7D32",
