@@ -278,13 +278,22 @@ function LabelSelector({ point, onSave, onClose, maxSvcNum }) {
 // Los clusters tienen dropdown de tipo de servicio inline.
 
 function buildSegments(points, clusters) {
-  // Set de índices que pertenecen a algún cluster, mapeado a su número
-  const clusterNumByIdx = {};
+  // Usar datetime como clave estable (no referencia de objeto — se rompe tras spread inmutable)
+  const clusterNumByDatetime = {};
   clusters.forEach(c => {
     c.points.forEach(cp => {
-      const idx = points.indexOf(cp);
-      if (idx !== -1) clusterNumByIdx[idx] = c.num;
+      const dtKey = cp.datetime instanceof Date ? cp.datetime.toISOString() : String(cp.datetime);
+      clusterNumByDatetime[dtKey] = c.num;
     });
+  });
+
+  // Construir lookup por índice usando el array points actual
+  const clusterNumByIdx = {};
+  points.forEach((p, idx) => {
+    const dtKey = p.datetime instanceof Date ? p.datetime.toISOString() : String(p.datetime);
+    if (clusterNumByDatetime[dtKey] != null) {
+      clusterNumByIdx[idx] = clusterNumByDatetime[dtKey];
+    }
   });
 
   const segments = [];
@@ -1264,7 +1273,7 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
 
               {/* Polylines con color por etiqueta */}
               {segments.map((s,i)=>(
-                <Polyline key={i} positions={s.pos} color={s.color} weight={3} opacity={0.85}/>
+                <Polyline key={`${i}-${s.color}`} positions={s.pos} color={s.color} weight={3} opacity={0.85}/>
               ))}
 
               {/* Marcadores de todos los puntos */}
@@ -1287,7 +1296,7 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
                 const hasLabel = p.state != null || p.servicio_num != null;
                 if (!hasLabel && !isSel) {
                   return (
-                    <CircleMarker key={i} center={[p.lat,p.lon]} radius={3}
+                    <CircleMarker key={`${i}-none`} center={[p.lat,p.lon]} radius={3}
                       color="#ccc" weight={1} fillColor="#ccc" fillOpacity={0.4}
                       eventHandlers={{click:()=>{setSelPt(i);setLabelEditing({idx:i,pt:p});}}}>
                     </CircleMarker>
@@ -1318,7 +1327,7 @@ export default function TripViewer({ trips, setTrips, initialIdx = 0, onBack }) 
                 );
 
                 return (
-                  <CircleMarker key={i} center={[p.lat,p.lon]} radius={radius}
+                  <CircleMarker key={`${i}-${p.servicio_num ?? "x"}-${p.state ?? "x"}`} center={[p.lat,p.lon]} radius={radius}
                     color={isSel ? "#fff" : isCluster ? "#fff" : col}
                     weight={isSel ? 3 : isCluster ? 2 : 1.5}
                     fillColor={col}
