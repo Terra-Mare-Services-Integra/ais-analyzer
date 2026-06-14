@@ -32,6 +32,39 @@ function fmtDateRange(trips) {
   return `${fmt(Math.min(...times))} → ${fmt(Math.max(...times))}`;
 }
 
+function fmtMin(min) {
+  if (min == null || isNaN(min)) return "—";
+  const h = Math.floor(min / 60), m = Math.round(min % 60);
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+function PStats({ stats, color }) {
+  if (!stats || !stats.n) return (
+    <td style={{padding:"6px 10px",textAlign:"center",borderLeft:"1px solid #EEF2F7",
+                fontFamily:"var(--mono)",fontSize:10,color:"#D6E0ED"}}>—</td>
+  );
+  return (
+    <td style={{padding:"5px 8px",textAlign:"center",borderLeft:"1px solid #EEF2F7"}}>
+      <div style={{display:"flex",flexDirection:"column",gap:1}}>
+        <div style={{display:"flex",justifyContent:"center",gap:4,flexWrap:"wrap"}}>
+          {[["P25", stats.p25], ["P50", stats.p50], ["P75", stats.p75]].map(([label, val]) => (
+            <span key={label} style={{
+              fontFamily:"var(--mono)",fontSize:9,
+              color: label==="P50" ? color : "#A5B5CC",
+              fontWeight: label==="P50" ? 700 : 400,
+            }}>
+              {label} {fmtMin(val)}
+            </span>
+          ))}
+        </div>
+        <div style={{fontSize:8,color:"#C4CADC",fontFamily:"var(--mono)",textAlign:"center"}}>
+          n={stats.n}
+        </div>
+      </div>
+    </td>
+  );
+}
+
 // ─── EMPTY STATE ─────────────────────────────────────────────────────────────
 function EmptyDashboard({ onGoUpload }) {
   return (
@@ -267,6 +300,35 @@ function CalibrationTable({ calib }) {
                 </tr>
               );
             })}
+            {/* Fila: Duración por cluster P25/P50/P75 */}
+            <tr style={{background:"#F0F7FF",borderTop:"2px solid #D6E0ED"}}>
+              <td style={{padding:"7px 14px",fontSize:11,color:"#213363",fontWeight:600,
+                           borderLeft:"3px solid #93C5FD"}}>
+                Duración por servicio
+                <div style={{fontSize:8,color:"#A5B5CC",fontFamily:"var(--mono)",
+                             fontWeight:400,marginTop:1}}>
+                  P25 / P50 / P75 — por cluster
+                </div>
+              </td>
+              {MODEL_COLS.map(m => (
+                <PStats key={m.key} stats={models[m.key].svcDuration} color={m.color} />
+              ))}
+            </tr>
+
+            {/* Fila: Tiempo en Zona Común por viaje P25/P50/P75 */}
+            <tr style={{background:"#F0F7FF",borderTop:"1px solid #EEF2F7"}}>
+              <td style={{padding:"7px 14px",fontSize:11,color:"#213363",fontWeight:600,
+                           borderLeft:"3px solid #93C5FD"}}>
+                Tiempo en Zona Común
+                <div style={{fontSize:8,color:"#A5B5CC",fontFamily:"var(--mono)",
+                             fontWeight:400,marginTop:1}}>
+                  P25 / P50 / P75 — por viaje
+                </div>
+              </td>
+              {MODEL_COLS.map(m => (
+                <PStats key={m.key} stats={models[m.key].zcDuration} color={m.color} />
+              ))}
+            </tr>
           </tbody>
 
           <tfoot>
