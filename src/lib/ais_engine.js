@@ -952,6 +952,25 @@ export function aggregateProjected(trips, modelKey) {
  *   Así se puede ver: "para los viajes que YA validé, ¿cuántos detectó el modelo
  *   vs cuántos hay realmente?" — eso muestra la precisión del modelo.
  */
+// ─── PERCENTILE HELPER ───────────────────────────────────────────────────────
+function _percentile(arr, p) {
+  if (!arr.length) return null;
+  const sorted = [...arr].sort((a, b) => a - b);
+  const idx = (p / 100) * (sorted.length - 1);
+  const lo = Math.floor(idx), hi = Math.ceil(idx);
+  return lo === hi ? sorted[lo] : sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
+}
+
+// Retorna {p25, p50, p75} en minutos, o nulls si no hay datos
+function _pStats(arr) {
+  return {
+    p25: _percentile(arr, 25),
+    p50: _percentile(arr, 50),
+    p75: _percentile(arr, 75),
+    n:   arr.length,
+  };
+}
+
 export function aggregateCalibration(trips) {
   const MODEL_KEYS = ["A", "B", "C", "cons"];
 
@@ -979,6 +998,9 @@ export function aggregateCalibration(trips) {
   const zcTripsAll       = { A:0, B:0, C:0, cons:0 };
   const zcTripsValidated = { A:0, B:0, C:0, cons:0 };
   const zcTripsPending   = { A:0, B:0, C:0, cons:0 };
+  // Arrays de duraciones para percentiles
+  const svcDurations = { A:[], B:[], C:[], cons:[] }; // duración por cluster (min)
+  const zcDurations  = { A:[], B:[], C:[], cons:[] }; // tiempo en ZC por viaje (min)
 
   // Servicios reales (clasificación manual) en viajes validados con ZC
   // Un viaje validado "cuenta" para ZC si el modelo A detectó algo en él
@@ -1004,6 +1026,28 @@ export function aggregateCalibration(trips) {
       if (n === 0) continue;
       detectedAll[key] += n;
       zcTripsAll[key]++;
+
+      // ── Métrica 1: duración de cada cluster (primer → último punto) ──────
+      const byNum = {};
+      for (const { origIdx, servicio_num } of res) {
+        if (!byNum[servicio_num]) byNum[servicio_num] = [];
+        byNum[servicio_num].push(trip.points[origIdx]);
+      }
+      for (const pts of Object.values(byNum)) {
+        const times = pts.map(p => new Date(p.datetime).getTime()).filter(t => !isNaN(t));
+        if (times.length < 2) continue;
+        const durMin = (Math.max(...times) - Math.min(...times)) / 60000;
+        if (durMin > 0) svcDurations[key].push(durMin);
+      }
+
+      // ── Métrica 2: tiempo en ZC (primer → último punto ZC del viaje) ─────
+      const zcPts = trip.points.filter(p => p.zone === "ZONA_COMUN");
+      const zcTimes = zcPts.map(p => new Date(p.datetime).getTime()).filter(t => !isNaN(t));
+      if (zcTimes.length >= 2) {
+        const zcDurMin = (Math.max(...zcTimes) - Math.min(...zcTimes)) / 60000;
+        if (zcDurMin > 0) zcDurations[key].push(zcDurMin);
+      }
+
       if (trip.validated) {
         detectedValidated[key] += n;
         zcTripsValidated[key]++;
@@ -1058,6 +1102,9 @@ export function aggregateCalibration(trips) {
       zcTripsAll:        zcTripsAll[key],
       zcTripsValidated:  zcTripsValidated[key],
       zcTripsPending:    zcTripsPending[key],
+      // Percentiles de duración
+      svcDuration:       _pStats(svcDurations[key]),  // por cluster
+      zcDuration:        _pStats(zcDurations[key]),   // tiempo en ZC por viaje
     };
   }
 
