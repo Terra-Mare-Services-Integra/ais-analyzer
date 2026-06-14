@@ -1001,6 +1001,7 @@ export function aggregateCalibration(trips) {
   // Arrays de duraciones para percentiles
   const svcDurations = { A:[], B:[], C:[], cons:[] }; // duración por cluster (min)
   const zcDurations  = { A:[], B:[], C:[], cons:[] }; // tiempo en ZC por viaje (min)
+  const calendarDays = { A:[], B:[], C:[], cons:[] }; // días calendario ART por cluster
 
   // Servicios reales (clasificación manual) en viajes validados con ZC
   // Un viaje validado "cuenta" para ZC si el modelo A detectó algo en él
@@ -1038,6 +1039,20 @@ export function aggregateCalibration(trips) {
         if (times.length < 2) continue;
         const durMin = (Math.max(...times) - Math.min(...times)) / 60000;
         if (durMin > 0) svcDurations[key].push(durMin);
+
+        // ── Métrica 3: días calendario ART (UTC-3) que toca el cluster ──────
+        // Un día = una fecha distinta en ART, independientemente de las horas.
+        // Si el cluster empieza martes 22:00 ART y termina miércoles 04:00 ART → 2 días.
+        const TZ_OFFSET_MS = -3 * 60 * 60 * 1000; // ART = UTC-3
+        const artDates = new Set(
+          times.map(t => {
+            const artMs = t + TZ_OFFSET_MS;
+            const d = new Date(artMs);
+            // Fecha como string YYYY-MM-DD en UTC (que después de offset = ART)
+            return `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`;
+          })
+        );
+        calendarDays[key].push(artDates.size);
       }
 
       // ── Métrica 2: tiempo en ZC (primer → último punto ZC del viaje) ─────
@@ -1105,6 +1120,7 @@ export function aggregateCalibration(trips) {
       // Percentiles de duración
       svcDuration:       _pStats(svcDurations[key]),  // por cluster
       zcDuration:        _pStats(zcDurations[key]),   // tiempo en ZC por viaje
+      calendarDays:      _pStats(calendarDays[key]),  // días calendario ART por cluster
     };
   }
 
