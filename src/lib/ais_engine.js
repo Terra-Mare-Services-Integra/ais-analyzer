@@ -967,33 +967,54 @@ export function aggregateCalibration(trips) {
     // consenso
     const rA = runModelA(points), rB = runModelB(points), rC = runModelC(points);
     const cMap = buildConsensus(points, rA, rB, rC);
-    // Convertir consensusMap a formato Array<{origIdx, servicio_num}>
     const result = [];
     cMap.forEach(({ servicio_num }, origIdx) => result.push({ origIdx, servicio_num }));
     return result;
   };
 
-  // Conteos por modelo
+  // Conteos por modelo — SOLO viajes con al menos 1 cluster en ZC
   const detectedAll       = { A:0, B:0, C:0, cons:0 };
   const detectedValidated = { A:0, B:0, C:0, cons:0 };
+  // Cantidad de viajes con trabajo en ZC por modelo (para mostrar en UI)
+  const zcTripsAll       = { A:0, B:0, C:0, cons:0 };
+  const zcTripsValidated = { A:0, B:0, C:0, cons:0 };
+  const zcTripsPending   = { A:0, B:0, C:0, cons:0 };
 
-  // Servicios reales (clasificación manual) en viajes validados
+  // Servicios reales (clasificación manual) en viajes validados con ZC
+  // Un viaje validado "cuenta" para ZC si el modelo A detectó algo en él
+  // (usamos A como referencia para el universo de viajes validados con ZC)
   let realValidated = 0;
+  let realValidatedZcTrips = 0; // viajes validados con al menos 1 cluster real en ZC
   const emptyOps = () => ({ agua_zc:0, slop_zc:0, lub_zc:0, alijo_zc:0, alijo_za:0, alijo_zd:0 });
   const opsValidated = emptyOps();
 
   for (const trip of trips) {
     if (!trip.points?.length) continue;
 
-    // Correr los 4 modelos sobre este viaje
+    // Correr los 4 modelos y filtrar solo viajes con ZC
+    const results = {};
     for (const key of MODEL_KEYS) {
-      const res = runModel(key, trip.points);
-      const n   = countSvcs(res);
-      detectedAll[key] += n;
-      if (trip.validated) detectedValidated[key] += n;
+      results[key] = runModel(key, trip.points);
     }
 
-    // Si está validado: contar servicios reales
+    for (const key of MODEL_KEYS) {
+      const res = results[key];
+      const n   = countSvcs(res);
+      // Solo contar si el modelo detectó al menos 1 cluster en este viaje
+      if (n === 0) continue;
+      detectedAll[key] += n;
+      zcTripsAll[key]++;
+      if (trip.validated) {
+        detectedValidated[key] += n;
+        zcTripsValidated[key]++;
+      } else {
+        zcTripsPending[key]++;
+      }
+    }
+
+    // Si está validado: contar servicios reales en ZC
+    // Un viaje validado entra al universo ZC si tiene al menos 1 servicio_num
+    // (clasificado manualmente) — independiente de lo que diga el modelo.
     if (trip.validated) {
       const byNum = {};
       for (const pt of trip.points) {
@@ -1001,9 +1022,12 @@ export function aggregateCalibration(trips) {
         if (!byNum[pt.servicio_num]) byNum[pt.servicio_num] = [];
         byNum[pt.servicio_num].push(pt);
       }
+      const svcCount = Object.keys(byNum).length;
+      if (svcCount === 0) continue; // viaje validado sin clusters → no es ZC
+
+      realValidatedZcTrips++;
       for (const pts of Object.values(byNum)) {
         realValidated++;
-        // Tipo dominante
         const typeCount = {};
         for (const pt of pts) {
           const t = pt?.tipo_servicio;
@@ -1027,11 +1051,20 @@ export function aggregateCalibration(trips) {
     models[key] = {
       detectedAll:       detectedAll[key],
       detectedValidated: detectedValidated[key],
-      uncatalogued:      Math.max(0, uncatalogued), // nunca negativo
-      error,                                         // + = sobreestima, - = subestima
+      uncatalogued:      Math.max(0, uncatalogued),
+      error,
       total:             uncatalogued + realValidated,
+      // Conteo de viajes con ZC por modelo
+      zcTripsAll:        zcTripsAll[key],
+      zcTripsValidated:  zcTripsValidated[key],
+      zcTripsPending:    zcTripsPending[key],
     };
   }
 
-  return { models, realValidated, opsValidated };
+  return {
+    models,
+    realValidated,
+    realValidatedZcTrips,
+    opsValidated,
+  };
 }
