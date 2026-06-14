@@ -121,10 +121,10 @@ function CalibrationTable({ calib }) {
         <div>
           <span style={{fontFamily:"var(--mono)",fontSize:9,fontWeight:600,color:"#6381A7",
                         textTransform:"uppercase",letterSpacing:1}}>
-            Calibración de modelos — servicios detectados
+            Calibración de modelos — solo viajes con trabajo en Zona Común
           </span>
           <span style={{fontSize:9,color:"#A5B5CC",marginLeft:10,fontFamily:"var(--mono)"}}>
-            {realValidated} servicios reales validados
+            {realValidated} servicios reales · {calib.realValidatedZcTrips ?? "?"} viajes validados con ZC
           </span>
         </div>
         {bestKey && (
@@ -177,21 +177,46 @@ function CalibrationTable({ calib }) {
           </thead>
 
           <tbody>
-            {/* Fila 1: Detectado en todos los viajes */}
+            {/* Fila 1: Detectado en viajes con ZC */}
             <tr style={{background:"#F8FAFC",borderBottom:"1px solid #F0F4F9"}}>
               <td style={{padding:"7px 14px",fontSize:11,color:"#213363",fontWeight:600}}>
-                Detectado en todos los viajes
+                Detectado en viajes con ZC
               </td>
-              {MODEL_COLS.map(m => tdVal(models[m.key].detectedAll, m.color))}
+              {MODEL_COLS.map(m => (
+                <td key={m.key} style={{
+                  padding:"6px 10px",textAlign:"center",borderLeft:"1px solid #EEF2F7",
+                  background:`${m.color}0A`,
+                }}>
+                  <div style={{fontFamily:"var(--mono)",fontSize:12,fontWeight:700,
+                               color:models[m.key].detectedAll>0?m.color:"#D6E0ED"}}>
+                    {models[m.key].detectedAll}
+                  </div>
+                  <div style={{fontSize:8,color:"#A5B5CC",fontFamily:"var(--mono)",marginTop:1}}>
+                    {models[m.key].zcTripsAll} viajes
+                  </div>
+                </td>
+              ))}
             </tr>
 
             {/* Fila 2: Detectado en viajes validados (por el modelo) */}
             <tr style={{background:"#fff",borderBottom:"1px solid #F0F4F9"}}>
               <td style={{padding:"7px 14px 7px 22px",fontSize:11,color:"#6381A7"}}>
                 <span style={{color:"#A5B5CC",marginRight:4}}>−</span>
-                Detectado en viajes validados
+                Detectado en viajes validados con ZC
               </td>
-              {MODEL_COLS.map(m => tdVal(models[m.key].detectedValidated, "#6381A7"))}
+              {MODEL_COLS.map(m => (
+                <td key={m.key} style={{
+                  padding:"6px 10px",textAlign:"center",borderLeft:"1px solid #EEF2F7",
+                }}>
+                  <div style={{fontFamily:"var(--mono)",fontSize:12,fontWeight:700,
+                               color:models[m.key].detectedValidated>0?"#6381A7":"#D6E0ED"}}>
+                    {models[m.key].detectedValidated}
+                  </div>
+                  <div style={{fontSize:8,color:"#A5B5CC",fontFamily:"var(--mono)",marginTop:1}}>
+                    {models[m.key].zcTripsValidated} viajes
+                  </div>
+                </td>
+              ))}
             </tr>
 
             {/* Fila 3: Sin catalogar */}
@@ -204,12 +229,16 @@ function CalibrationTable({ calib }) {
               {MODEL_COLS.map(m => (
                 <td key={m.key} style={{
                   padding:"6px 10px",textAlign:"center",
-                  fontFamily:"var(--mono)",fontSize:12,fontWeight:700,
-                  color: models[m.key].uncatalogued === 0 ? "#D6E0ED" : "#92400E",
                   borderLeft:"1px solid #EEF2F7",
                   background:"#FFFBEB",
                 }}>
-                  {models[m.key].uncatalogued}
+                  <div style={{fontFamily:"var(--mono)",fontSize:12,fontWeight:700,
+                               color:models[m.key].uncatalogued===0?"#D6E0ED":"#92400E"}}>
+                    {models[m.key].uncatalogued}
+                  </div>
+                  <div style={{fontSize:8,color:"#C8813A",fontFamily:"var(--mono)",marginTop:1}}>
+                    {models[m.key].zcTripsPending} viajes
+                  </div>
                 </td>
               ))}
             </tr>
@@ -295,7 +324,7 @@ function CalibrationTable({ calib }) {
                    display:"flex",gap:16,flexWrap:"wrap"}}>
         <span>★ = modelo con menor error vs clasificación manual</span>
         <span>Error + = sobreestima · Error − = subestima</span>
-        <span>Sin catalogar = detectados en viajes aún no validados</span>
+        <span>Solo viajes con ≥1 cluster en Zona Común · Sin catalogar = pendientes con ZC</span>
       </div>
     </div>
   );
